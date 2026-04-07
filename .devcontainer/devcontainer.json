@@ -1,0 +1,27 @@
+{
+    "name": "fatx-rs",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "vadimcn.vscode-lldb",
+                "serayuzgur.crates",
+                "fill-labs.dependi"
+            ],
+            "settings": {
+                "rust-analyzer.check.command": "clippy",
+                "rust-analyzer.cargo.allTargets": true,
+                "editor.formatOnSave": true,
+                "[rust]": {
+                    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+                }
+            }
+        }
+    },
+    "postCreateCommand": "cargo build",
+    "remoteUser": "vscode"
+}

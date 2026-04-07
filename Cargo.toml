@@ -1,0 +1,17 @@
+[package]
+name = "fatx-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for interacting with Xbox FATX file systems"
+
+[dependencies]
+fatxlib = { path = "fatxlib" }
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+hex = "0.4"
+chrono = "0.4"
+libc = "0.2"
+
+[workspace]
+members = [".", "fatxlib"]
