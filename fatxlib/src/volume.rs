@@ -740,8 +740,8 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             offset += cluster_size;
         }
 
-        // Create directory entry
-        let now = chrono::Local::now();
+        // Create directory entry — use UTC so Xbox displays correct local time
+        let now = chrono::Utc::now();
         let date = DirectoryEntry::encode_date(now.format("%Y").to_string().parse().unwrap_or(2025), now.format("%m").to_string().parse().unwrap_or(1), now.format("%d").to_string().parse().unwrap_or(1));
         let time = DirectoryEntry::encode_time(now.format("%H").to_string().parse().unwrap_or(0), now.format("%M").to_string().parse().unwrap_or(0), now.format("%S").to_string().parse().unwrap_or(0));
 
@@ -786,7 +786,8 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let blank = vec![0xFFu8; cluster_size];
         self.write_cluster(cluster, &blank)?;
 
-        let now = chrono::Local::now();
+        // Use UTC so Xbox displays correct local time
+        let now = chrono::Utc::now();
         let date = DirectoryEntry::encode_date(
             now.format("%Y").to_string().parse().unwrap_or(2025),
             now.format("%m").to_string().parse().unwrap_or(1),
