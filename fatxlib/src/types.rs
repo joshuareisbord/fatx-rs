@@ -231,7 +231,11 @@ impl DirectoryEntry {
         let len = (self.filename_len as usize).min(MAX_FILENAME_LEN);
         let bytes = &self.filename_raw[..len];
         // Filter out padding bytes
-        let clean: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0xFF && b != 0x00).collect();
+        let clean: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .filter(|&b| b != 0xFF && b != 0x00)
+            .collect();
         String::from_utf8_lossy(&clean).to_string()
     }
 
@@ -291,7 +295,7 @@ impl DirectoryEntry {
 
     /// Encode a (year, month, day) into packed FAT date format.
     pub fn encode_date(year: u16, month: u8, day: u8) -> u16 {
-        let y = (year.saturating_sub(1980) & 0x7F) as u16;
+        let y = year.saturating_sub(1980) & 0x7F;
         (y << 9) | ((month as u16 & 0x0F) << 5) | (day as u16 & 0x1F)
     }
 
@@ -322,12 +326,42 @@ pub struct XboxPartition {
 // ---------------------------------------------------------------------------
 
 pub const OG_XBOX_PARTITIONS: &[XboxPartition] = &[
-    XboxPartition { name: "Config (CACHE0)",        offset: 0x0008_0000, size: 0x02EE_0000, generation: XboxGeneration::Original },
-    XboxPartition { name: "Game Cache (CACHE1)",     offset: 0x02F6_0000, size: 0x02EE_0000, generation: XboxGeneration::Original },
-    XboxPartition { name: "Cache (CACHE2)",          offset: 0x05E4_0000, size: 0x02EE_0000, generation: XboxGeneration::Original },
-    XboxPartition { name: "System (C)",              offset: 0x08CA_0000, size: 0x01F4_0000, generation: XboxGeneration::Original },
-    XboxPartition { name: "Data (E)",                offset: 0x0ABE_0000, size: 0x1312_D000, generation: XboxGeneration::Original },
-    XboxPartition { name: "Extended (F)",            offset: 0x1DD1_D000, size: 0,           generation: XboxGeneration::Original },
+    XboxPartition {
+        name: "Config (CACHE0)",
+        offset: 0x0008_0000,
+        size: 0x02EE_0000,
+        generation: XboxGeneration::Original,
+    },
+    XboxPartition {
+        name: "Game Cache (CACHE1)",
+        offset: 0x02F6_0000,
+        size: 0x02EE_0000,
+        generation: XboxGeneration::Original,
+    },
+    XboxPartition {
+        name: "Cache (CACHE2)",
+        offset: 0x05E4_0000,
+        size: 0x02EE_0000,
+        generation: XboxGeneration::Original,
+    },
+    XboxPartition {
+        name: "System (C)",
+        offset: 0x08CA_0000,
+        size: 0x01F4_0000,
+        generation: XboxGeneration::Original,
+    },
+    XboxPartition {
+        name: "Data (E)",
+        offset: 0x0ABE_0000,
+        size: 0x1312_D000,
+        generation: XboxGeneration::Original,
+    },
+    XboxPartition {
+        name: "Extended (F)",
+        offset: 0x1DD1_D000,
+        size: 0,
+        generation: XboxGeneration::Original,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -339,25 +373,25 @@ pub const XBOX360_PARTITIONS: &[XboxPartition] = &[
     XboxPartition {
         name: "360 System Cache",
         offset: 0x0008_0000,
-        size: 0x8000_0000,   // 2 GB
+        size: 0x8000_0000, // 2 GB
         generation: XboxGeneration::Xbox360,
     },
     XboxPartition {
         name: "360 Game Content",
         offset: 0x8008_0000,
-        size: 0xA0E3_0000,   // ~2.5 GB
+        size: 0xA0E3_0000, // ~2.5 GB
         generation: XboxGeneration::Xbox360,
     },
     XboxPartition {
         name: "360 Xbox 1 Compat",
         offset: 0x1_20EB_0000,
-        size: 0x1000_0000,   // 256 MB
+        size: 0x1000_0000, // 256 MB
         generation: XboxGeneration::Xbox360,
     },
     XboxPartition {
         name: "360 Data",
         offset: 0x1_30EB_0000,
-        size: 0,             // rest of drive
+        size: 0, // rest of drive
         generation: XboxGeneration::Xbox360,
     },
 ];

@@ -65,7 +65,11 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let magic: [u8; 4] = [sb_buf[0], sb_buf[1], sb_buf[2], sb_buf[3]];
         info!(
             "Read magic at offset 0x{:X}: {:02X} {:02X} {:02X} {:02X} (\"{}\")",
-            partition_offset, magic[0], magic[1], magic[2], magic[3],
+            partition_offset,
+            magic[0],
+            magic[1],
+            magic[2],
+            magic[3],
             String::from_utf8_lossy(&magic)
         );
         if !is_valid_magic(&magic) {
@@ -205,11 +209,19 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
     }
 
     fn write_u16_bytes(&self, val: u16) -> [u8; 2] {
-        if self.big_endian { val.to_be_bytes() } else { val.to_le_bytes() }
+        if self.big_endian {
+            val.to_be_bytes()
+        } else {
+            val.to_le_bytes()
+        }
     }
 
     fn write_u32_bytes(&self, val: u32) -> [u8; 4] {
-        if self.big_endian { val.to_be_bytes() } else { val.to_le_bytes() }
+        if self.big_endian {
+            val.to_be_bytes()
+        } else {
+            val.to_le_bytes()
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -247,7 +259,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let total_needed = pre_skip + buf.len();
         let aligned_len = (total_needed + 511) & !511;
 
-        if pre_skip == 0 && buf.len() % 512 == 0 {
+        if pre_skip == 0 && buf.len().is_multiple_of(512) {
             // Already aligned — write directly
             self.inner.seek(SeekFrom::Start(abs))?;
             self.inner.write_all(buf)?;
@@ -447,19 +459,37 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         // XTAF (Xbox 360) stores timestamps as date-then-time at each pair of offsets,
         // while original FATX stores time-then-date. Both are 2-byte fields.
         let (creation_time, creation_date) = if self.big_endian {
-            (self.read_u16(&[buf[54], buf[55]]), self.read_u16(&[buf[52], buf[53]]))
+            (
+                self.read_u16(&[buf[54], buf[55]]),
+                self.read_u16(&[buf[52], buf[53]]),
+            )
         } else {
-            (self.read_u16(&[buf[52], buf[53]]), self.read_u16(&[buf[54], buf[55]]))
+            (
+                self.read_u16(&[buf[52], buf[53]]),
+                self.read_u16(&[buf[54], buf[55]]),
+            )
         };
         let (write_time, write_date) = if self.big_endian {
-            (self.read_u16(&[buf[58], buf[59]]), self.read_u16(&[buf[56], buf[57]]))
+            (
+                self.read_u16(&[buf[58], buf[59]]),
+                self.read_u16(&[buf[56], buf[57]]),
+            )
         } else {
-            (self.read_u16(&[buf[56], buf[57]]), self.read_u16(&[buf[58], buf[59]]))
+            (
+                self.read_u16(&[buf[56], buf[57]]),
+                self.read_u16(&[buf[58], buf[59]]),
+            )
         };
         let (access_time, access_date) = if self.big_endian {
-            (self.read_u16(&[buf[62], buf[63]]), self.read_u16(&[buf[60], buf[61]]))
+            (
+                self.read_u16(&[buf[62], buf[63]]),
+                self.read_u16(&[buf[60], buf[61]]),
+            )
         } else {
-            (self.read_u16(&[buf[60], buf[61]]), self.read_u16(&[buf[62], buf[63]]))
+            (
+                self.read_u16(&[buf[60], buf[61]]),
+                self.read_u16(&[buf[62], buf[63]]),
+            )
         };
 
         Ok(DirectoryEntry {
@@ -510,10 +540,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
     /// Resolve a path like "/saves/game1.sav" into directory entries along the way,
     /// returning the final entry.
     pub fn resolve_path(&mut self, path: &str) -> Result<DirectoryEntry> {
-        let parts: Vec<&str> = path
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .collect();
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         if parts.is_empty() {
             // Root directory pseudo-entry
@@ -721,7 +748,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let clusters_needed = if data.is_empty() {
             1
         } else {
-            (data.len() + cluster_size - 1) / cluster_size
+            data.len().div_ceil(cluster_size)
         };
 
         let first_cluster = self.allocate_chain(clusters_needed)?;
@@ -742,8 +769,16 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         // Create directory entry — use UTC so Xbox displays correct local time
         let now = chrono::Utc::now();
-        let date = DirectoryEntry::encode_date(now.format("%Y").to_string().parse().unwrap_or(2025), now.format("%m").to_string().parse().unwrap_or(1), now.format("%d").to_string().parse().unwrap_or(1));
-        let time = DirectoryEntry::encode_time(now.format("%H").to_string().parse().unwrap_or(0), now.format("%M").to_string().parse().unwrap_or(0), now.format("%S").to_string().parse().unwrap_or(0));
+        let date = DirectoryEntry::encode_date(
+            now.format("%Y").to_string().parse().unwrap_or(2025),
+            now.format("%m").to_string().parse().unwrap_or(1),
+            now.format("%d").to_string().parse().unwrap_or(1),
+        );
+        let time = DirectoryEntry::encode_time(
+            now.format("%H").to_string().parse().unwrap_or(0),
+            now.format("%M").to_string().parse().unwrap_or(0),
+            now.format("%S").to_string().parse().unwrap_or(0),
+        );
 
         let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
         let name_bytes = filename.as_bytes();
@@ -764,7 +799,12 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         };
 
         self.add_dirent_to_directory(parent.first_cluster, &entry)?;
-        info!("Created file '{}' ({} bytes, {} clusters)", filename, data.len(), clusters_needed);
+        info!(
+            "Created file '{}' ({} bytes, {} clusters)",
+            filename,
+            data.len(),
+            clusters_needed
+        );
         Ok(())
     }
 

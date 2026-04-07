@@ -37,7 +37,11 @@ pub fn detect_xbox_partitions<T: Read + Write + Seek>(
     } else {
         device.seek(SeekFrom::End(0))?
     };
-    info!("Device size: {} (0x{:X} bytes)", format_size(device_size), device_size);
+    info!(
+        "Device size: {} (0x{:X} bytes)",
+        format_size(device_size),
+        device_size
+    );
     let mut results = Vec::new();
     // Track which offsets we've already checked to avoid duplicates
     // (OG Xbox offset 0x80000 overlaps with 360 System Cache)
@@ -48,13 +52,19 @@ pub fn detect_xbox_partitions<T: Read + Write + Seek>(
 
     for part in all_parts {
         if seen_offsets.contains(&part.offset) {
-            debug!("Skipping duplicate offset 0x{:X} ({})", part.offset, part.name);
+            debug!(
+                "Skipping duplicate offset 0x{:X} ({})",
+                part.offset, part.name
+            );
             continue;
         }
         seen_offsets.insert(part.offset);
 
         if part.offset >= device_size {
-            debug!("Skipping '{}' at 0x{:X} — beyond device size", part.name, part.offset);
+            debug!(
+                "Skipping '{}' at 0x{:X} — beyond device size",
+                part.name, part.offset
+            );
             continue;
         }
 
@@ -125,10 +135,13 @@ fn probe_magic<T: Read + Seek>(device: &mut T, offset: u64) -> Result<(bool, Str
             } else if magic == XTAF_MAGIC {
                 Ok((true, "XTAF".to_string()))
             } else {
-                Ok((false, format!(
-                    "{:02X} {:02X} {:02X} {:02X}",
-                    magic[0], magic[1], magic[2], magic[3]
-                )))
+                Ok((
+                    false,
+                    format!(
+                        "{:02X} {:02X} {:02X} {:02X}",
+                        magic[0], magic[1], magic[2], magic[3]
+                    ),
+                ))
             }
         }
         Err(_) => Ok((false, "read error".to_string())),
@@ -137,10 +150,7 @@ fn probe_magic<T: Read + Seek>(device: &mut T, offset: u64) -> Result<(bool, Str
 
 /// Scan a device sector-by-sector for FATX/XTAF magic signatures.
 /// This is a brute-force approach for non-standard partition layouts.
-pub fn scan_for_fatx<T: Read + Write + Seek>(
-    device: &mut T,
-    max_offset: u64,
-) -> Result<Vec<u64>> {
+pub fn scan_for_fatx<T: Read + Write + Seek>(device: &mut T, max_offset: u64) -> Result<Vec<u64>> {
     let device_size = device.seek(SeekFrom::End(0))?;
     let scan_limit = max_offset.min(device_size);
     let mut found = Vec::new();

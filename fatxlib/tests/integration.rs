@@ -144,8 +144,7 @@ fn test_rename_file() {
     vol.create_file("/old.txt", b"some data")
         .expect("Failed to create file");
 
-    vol.rename("/old.txt", "new.txt")
-        .expect("Failed to rename");
+    vol.rename("/old.txt", "new.txt").expect("Failed to rename");
 
     // Old name should not resolve
     assert!(vol.resolve_path("/old.txt").is_err());

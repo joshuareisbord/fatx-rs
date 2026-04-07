@@ -151,9 +151,21 @@ fn refresh_entries(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
                     let attr = format!(
                         "{}{}{}{}",
                         if e.is_directory() { "d" } else { "-" },
-                        if e.attributes.contains(FileAttributes::READ_ONLY) { "r" } else { "-" },
-                        if e.attributes.contains(FileAttributes::HIDDEN) { "h" } else { "-" },
-                        if e.attributes.contains(FileAttributes::SYSTEM) { "s" } else { "-" },
+                        if e.attributes.contains(FileAttributes::READ_ONLY) {
+                            "r"
+                        } else {
+                            "-"
+                        },
+                        if e.attributes.contains(FileAttributes::HIDDEN) {
+                            "h"
+                        } else {
+                            "-"
+                        },
+                        if e.attributes.contains(FileAttributes::SYSTEM) {
+                            "s"
+                        } else {
+                            "-"
+                        },
                     );
                     DisplayEntry {
                         name: e.filename(),
@@ -168,18 +180,25 @@ fn refresh_entries(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
 
             // Sort: directories first, then alphabetical
             app.entries.sort_by(|a, b| {
-                b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                b.is_dir
+                    .cmp(&a.is_dir)
+                    .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
 
             let count = app.entries.len();
-            app.set_status(&format!("{} item(s) — ↑↓ navigate, Enter open, d download, u upload, q quit", count));
+            app.set_status(&format!(
+                "{} item(s) — ↑↓ navigate, Enter open, d download, u upload, q quit",
+                count
+            ));
 
             // Reset selection
             if !app.entries.is_empty() {
                 app.list_state.select(Some(0));
             } else {
                 app.list_state.select(None);
-                app.set_status("(empty directory) — Backspace to go up, u to upload, n to mkdir, q to quit");
+                app.set_status(
+                    "(empty directory) — Backspace to go up, u to upload, n to mkdir, q to quit",
+                );
             }
         }
         Err(e) => {
@@ -279,7 +298,11 @@ fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Ke
                     // On Enter for a file, show info
                     let name = entry.name.clone();
                     let size = entry.size;
-                    app.set_status(&format!("'{}' — {} — press 'd' to download", name, format_size(size)));
+                    app.set_status(&format!(
+                        "'{}' — {} — press 'd' to download",
+                        name,
+                        format_size(size)
+                    ));
                 }
             }
         }
@@ -342,21 +365,19 @@ fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Ke
             }
         }
         // Volume info
-        KeyCode::Char('i') => {
-            match vol.stats() {
-                Ok(stats) => {
-                    app.set_status(&format!(
-                        "Volume: {} | Used: {} | Free: {} | Clusters: {}/{}",
-                        app.partition_name,
-                        format_size(stats.used_size),
-                        format_size(stats.free_size),
-                        stats.used_clusters,
-                        stats.total_clusters,
-                    ));
-                }
-                Err(e) => app.set_error(&format!("Stats error: {}", e)),
+        KeyCode::Char('i') => match vol.stats() {
+            Ok(stats) => {
+                app.set_status(&format!(
+                    "Volume: {} | Used: {} | Free: {} | Clusters: {}/{}",
+                    app.partition_name,
+                    format_size(stats.used_size),
+                    format_size(stats.free_size),
+                    stats.used_clusters,
+                    stats.total_clusters,
+                ));
             }
-        }
+            Err(e) => app.set_error(&format!("Stats error: {}", e)),
+        },
         _ => {}
     }
 }
@@ -404,7 +425,10 @@ fn handle_input_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Key
 fn do_download(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &str) {
     let name = match app.selected_name() {
         Some(n) => n,
-        None => { app.set_error("No file selected"); return; }
+        None => {
+            app.set_error("No file selected");
+            return;
+        }
     };
     let fatx_path = app.full_path(&name);
 
@@ -420,7 +444,12 @@ fn do_download(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &
             match fs::write(&path, &data) {
                 Ok(_) => {
                     app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
-                    app.set_status(&format!("Downloaded '{}' → {} ({})", name, path.display(), format_size(data.len() as u64)));
+                    app.set_status(&format!(
+                        "Downloaded '{}' → {} ({})",
+                        name,
+                        path.display(),
+                        format_size(data.len() as u64)
+                    ));
                 }
                 Err(e) => app.set_error(&format!("Write error: {}", e)),
             }
@@ -438,24 +467,30 @@ fn do_upload(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &st
 
     let filename = match path.file_name() {
         Some(n) => n.to_string_lossy().to_string(),
-        None => { app.set_error("Invalid filename"); return; }
+        None => {
+            app.set_error("Invalid filename");
+            return;
+        }
     };
 
     let fatx_path = app.full_path(&filename);
     app.set_status(&format!("Uploading '{}'...", filename));
 
     match fs::read(&path) {
-        Ok(data) => {
-            match vol.create_file(&fatx_path, &data) {
-                Ok(_) => {
-                    let _ = vol.flush();
-                    app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
-                    app.set_status(&format!("Uploaded '{}' → {} ({})", path.display(), fatx_path, format_size(data.len() as u64)));
-                    refresh_entries(app, vol);
-                }
-                Err(e) => app.set_error(&format!("Upload error: {}", e)),
+        Ok(data) => match vol.create_file(&fatx_path, &data) {
+            Ok(_) => {
+                let _ = vol.flush();
+                app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
+                app.set_status(&format!(
+                    "Uploaded '{}' → {} ({})",
+                    path.display(),
+                    fatx_path,
+                    format_size(data.len() as u64)
+                ));
+                refresh_entries(app, vol);
             }
-        }
+            Err(e) => app.set_error(&format!("Upload error: {}", e)),
+        },
         Err(e) => app.set_error(&format!("Read local error: {}", e)),
     }
 }
@@ -479,7 +514,10 @@ fn do_mkdir(app: &mut App, vol: &mut FatxVolume<std::fs::File>, name: &str) {
 fn do_delete(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
     let name = match app.selected_name() {
         Some(n) => n,
-        None => { app.set_error("No file selected"); return; }
+        None => {
+            app.set_error("No file selected");
+            return;
+        }
     };
     let path = app.full_path(&name);
     match vol.delete(&path) {
@@ -495,7 +533,10 @@ fn do_delete(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
 fn do_rename(app: &mut App, vol: &mut FatxVolume<std::fs::File>, new_name: &str) {
     let old_name = match app.selected_name() {
         Some(n) => n,
-        None => { app.set_error("No file selected"); return; }
+        None => {
+            app.set_error("No file selected");
+            return;
+        }
     };
     if new_name.is_empty() {
         app.set_error("Name cannot be empty");
@@ -523,7 +564,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
+            Constraint::Length(3), // header
             Constraint::Min(5),    // file list
             Constraint::Length(3), // status / input
         ])
@@ -536,7 +577,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
     );
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::White).bg(Color::DarkGray).bold())
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::Gray)));
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Gray)),
+        );
     frame.render_widget(header, chunks[0]);
 
     // -- File list --
@@ -585,7 +630,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
         // Input mode — show prompt + text field
         let input_text = format!(" {} {}", app.input_prompt, app.input_buffer);
         let input_bar = Paragraph::new(input_text)
-            .style(Style::default().fg(Color::Yellow).bg(Color::Rgb(30, 30, 50)))
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Rgb(30, 30, 50)),
+            )
             .block(
                 Block::default()
                     .title(" Input (Enter to confirm, Esc to cancel) ")

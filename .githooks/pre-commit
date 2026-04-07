@@ -1,0 +1,48 @@
+#!/bin/bash
+# Pre-commit hook for fatx-rs
+# Install: git config core.hooksPath .githooks
+#
+# Runs formatting, linting, and security checks before each commit.
+# To skip in an emergency: git commit --no-verify
+
+set -e
+
+echo "[pre-commit] Running checks..."
+
+# 1. Format check
+echo "[pre-commit] Checking formatting (cargo fmt)..."
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo ""
+    echo "ERROR: Code is not formatted. Run 'cargo fmt --all' and try again."
+    exit 1
+fi
+
+# 2. Lint check
+echo "[pre-commit] Running linter (cargo clippy)..."
+if ! cargo clippy --workspace -- -D warnings 2>&1; then
+    echo ""
+    echo "ERROR: Clippy found warnings. Fix them and try again."
+    exit 1
+fi
+
+# 3. Tests
+echo "[pre-commit] Running tests..."
+if ! cargo test --workspace 2>&1; then
+    echo ""
+    echo "ERROR: Tests failed. Fix them and try again."
+    exit 1
+fi
+
+# 4. Security audit (optional -- only runs if cargo-audit is installed)
+if command -v cargo-audit &>/dev/null; then
+    echo "[pre-commit] Running security audit (cargo audit)..."
+    if ! cargo audit 2>&1; then
+        echo ""
+        echo "WARNING: Security audit found issues. Review above."
+        # Don't block the commit for audit warnings, just inform
+    fi
+else
+    echo "[pre-commit] Skipping security audit (install with: cargo install cargo-audit)"
+fi
+
+echo "[pre-commit] All checks passed."
