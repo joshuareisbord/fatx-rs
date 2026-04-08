@@ -6,3 +6,5 @@ _git2_*
 .agent/request.json
 .agent/processing
 .agent/commit-msg.txt
+docs/
+.codegraph/
