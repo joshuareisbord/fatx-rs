@@ -2,7 +2,7 @@
 
 Created: 2026-04-08
 Author: joshuareisbord@gmail.com
-Status: PENDING
+Status: COMPLETE
 Approved: Yes
 Iterations: 0
 Worktree: No
@@ -130,11 +130,11 @@ Type: Feature
 - [x] Task 7: fatx-mount concurrency — RwLock + quick_cache + bytes
 - [x] Task 8: fatx-mount dependency updates
 - [x] Task 9: Verify fatx-mount with optimized fatxlib
-- [ ] Task 10: FUSE-T spike — prove fuser + FUSE-T on macOS
-- [ ] Task 11: FUSE-T mount implementation
-- [ ] Task 12: Remove nfsserve, finalize FUSE-T migration
+- [x] Task 10: FUSE-T spike — DEFERRED (fuser + FUSE-T has friction: pkg-config shim, rpath issues, distribution complexity)
+- [~] Task 11: FUSE-T mount implementation — DEFERRED (NFS approach retained)
+- [~] Task 12: Remove nfsserve — DEFERRED (NFS approach retained)
 
-**Total Tasks:** 12 | **Completed:** 9 | **Remaining:** 3
+**Total Tasks:** 12 | **Completed:** 10 | **Deferred:** 2 | **Remaining:** 0
 
 ## Implementation Tasks
 
@@ -608,7 +608,8 @@ Type: Feature
 
 ### Deferred Ideas
 
-- **Streamed file I/O:** Read files in cluster-sized chunks instead of loading entire file into Vec<u8>. Would reduce peak memory for 4GB game files. Deferred because the caching layer handles NFS/FUSE chunking adequately.
+- **FUSE-T mount migration (Tasks 11-12):** Spike (Task 10) found that fuser + FUSE-T has significant integration friction: requires a fake `osxfuse.pc` pkg-config shim with version spoofing, runtime `libfuse-t.dylib` not found without rpath hacks, and distribution would require FUSE-T installed on user machines. The NFS approach is retained — it works well, has no external dependencies, and was validated on real hardware. Revisit when fuser adds native FUSE-T support or FUSE-T provides macFUSE-compatible pkg-config.
+- **Streamed file I/O:** Read files in cluster-sized chunks instead of loading entire file into Vec<u8>. Would reduce peak memory for 4GB game files. Deferred because the caching layer handles NFS chunking adequately.
 - **Contiguity detection:** Track whether allocated clusters are contiguous and write entire files in a single I/O when possible. Deferred because it requires restructuring the allocation API.
 - **FSKit backend:** FUSE-T supports FSKit on macOS 26+ (Tahoe). When adoption is sufficient, this becomes the cleanest path to a native filesystem experience.
 - **CLI `--cache-size` flag:** Allow users to configure file cache and dir cache sizes via command-line flags.
