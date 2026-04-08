@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "getrandom 0.3.4",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -553,7 +566,7 @@ name = "fatx-mount"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
+ "bytes",
  "clap",
  "core-foundation",
  "core-foundation-sys",
@@ -564,6 +577,8 @@ dependencies = [
  "log",
  "mach2 0.6.0",
  "nfsserve",
+ "parking_lot",
+ "quick_cache",
  "tokio",
 ]
 
@@ -572,10 +587,11 @@ name = "fatxlib"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.11.0",
- "chrono",
  "libc",
  "log",
+ "nix",
  "thiserror 2.0.18",
+ "time",
 ]
 
 [[package]]
@@ -1277,6 +1293,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick_cache"
+version = "0.6.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a70b1b8b47e31d0498ecbc3c5470bb931399a8bfed1fd79d1717a61ce7f96e3"
+dependencies = [
+ "ahash",
+ "equivalent",
+ "hashbrown 0.16.1",
+ "parking_lot",
 ]
 
 [[package]]
