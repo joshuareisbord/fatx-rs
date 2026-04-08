@@ -5,3 +5,4 @@ _git2_*
 .agent/response.json
 .agent/request.json
 .agent/processing
+.agent/commit-msg.txt
