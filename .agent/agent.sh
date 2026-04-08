@@ -1,8 +1,18 @@
 #!/bin/bash
-# fatx-agent: File-based RPC agent for fatx
+# fatx-agent: Host command bridge for fatx-rs development
 #
-# Watches .agent/request.json for commands, executes them via fatx,
+# Bridges the gap between a sandboxed development environment and the macOS
+# host. Watches .agent/request.json for commands, executes them on the host,
 # and writes results to .agent/response.json.
+#
+# Supported commands:
+#   shell     — Run any shell command on the host (git, cargo fmt, system tools)
+#   build     — cargo build --release
+#   cargo-test — cargo test --workspace
+#   ftp-ls    — List a directory on an Xbox 360 via FTP
+#   ftp-get   — Download a file from Xbox 360 via FTP
+#   ftp-scan  — Scan local network for FTP servers
+#   <other>   — Passed to the fatx CLI as: fatx --json <command> <device> [args...]
 #
 # Usage: sudo bash .agent/agent.sh [device]
 #   device: e.g. /dev/rdisk4 (default)
@@ -22,13 +32,17 @@ if [ ! -f "$CLI" ]; then
     echo "WARN: fatx not found at $CLI — will build on first request or 'build' command."
 fi
 
-echo "╔══════════════════════════════════════════╗"
-echo "║     fatx-agent — FATX Drive Bridge       ║"
-echo "╠══════════════════════════════════════════╣"
+echo "╔══════════════════════════════════════════════╗"
+echo "║  fatx-agent — Host Command Bridge            ║"
+echo "╠══════════════════════════════════════════════╣"
+echo "║  Project: $PROJECT_DIR"
 echo "║  Device:  $DEVICE"
 echo "║  CLI:     $CLI"
 echo "║  Watching: $REQUEST"
-echo "╚══════════════════════════════════════════╝"
+echo "╠══════════════════════════════════════════════╣"
+echo "║  Commands: shell, build, cargo-test,         ║"
+echo "║    ftp-ls, ftp-get, ftp-scan, or fatx <cmd>  ║"
+echo "╚══════════════════════════════════════════════╝"
 echo ""
 echo "Waiting for commands... (Ctrl+C to stop)"
 echo ""

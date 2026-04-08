@@ -29,6 +29,8 @@ use fatxlib::partition::{detect_xbox_partitions, format_size};
 use fatxlib::types::{DirectoryEntry, FileAttributes, FIRST_CLUSTER};
 use fatxlib::volume::FatxVolume;
 
+mod disk_watcher;
+
 const ROOT_FILEID: fileid3 = 1; // FATX root cluster is FIRST_CLUSTER (1)
 
 /// Convert a FATX cluster number to an NFS file ID.
@@ -1572,6 +1574,103 @@ async fn main() {
             }
         });
     }
+
+    // ── DISK REMOVAL WATCHER ──
+    // Monitor the underlying block device for removal (USB unplug, eject, etc.).
+    // Uses Apple's DiskArbitration framework for near-instant detection (~100ms)
+    // with a polling fallback (checks /dev/rdiskN every 2 seconds).
+    // When the disk disappears, we trigger a graceful shutdown to avoid the
+    // catastrophic stale NFS mount deadlock.
+    let _disk_disappeared = {
+        let device_str = device_path.display().to_string();
+        let bsd_name = disk_watcher::bsd_name_from_device_path(&device_str);
+
+        if let Some(ref name) = bsd_name {
+            let watcher = disk_watcher::DiskWatcher::start(name, &device_str);
+            let disappeared = Arc::clone(&watcher.disappeared);
+
+            // Spawn a tokio task that polls the disappeared flag and triggers shutdown
+            let disk_mp = if cli.mount {
+                Some(mp_str.clone())
+            } else {
+                None
+            };
+            let disk_vol = Arc::clone(&shutdown_vol);
+            let disk_flush_flag = Arc::clone(&shutdown_flush_flag);
+            let disk_dirty = Arc::clone(&shutdown_dirty);
+            let disk_dir_cache = Arc::clone(&shutdown_dir_cache);
+            let disk_file_cache = Arc::clone(&shutdown_file_cache);
+            let disappeared_for_task = Arc::clone(&disappeared);
+
+            tokio::spawn(async move {
+                // Hold onto the watcher so its threads stay alive.
+                // When this task exits (via process::exit), Drop sets the stop flag.
+                let _watcher = watcher;
+
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+                loop {
+                    interval.tick().await;
+                    if disappeared_for_task.load(Ordering::Relaxed) {
+                        eprintln!(
+                            "\n[DISK REMOVED] Device disconnected! Starting emergency shutdown..."
+                        );
+                        eprintln!("[DISK REMOVED] Dirty writes will be LOST (device is gone).");
+
+                        // Clear dirty files — can't write to a missing device
+                        {
+                            let mut dirty = disk_dirty.lock().unwrap();
+                            let lost = dirty.len();
+                            dirty.clear();
+                            if lost > 0 {
+                                eprintln!(
+                                    "[DISK REMOVED] Dropped {} dirty file(s) (device unavailable)",
+                                    lost
+                                );
+                            }
+                        }
+                        disk_flush_flag.store(false, Ordering::Relaxed);
+
+                        // Clear caches
+                        {
+                            disk_dir_cache.lock().unwrap().clear();
+                            disk_file_cache.lock().unwrap().clear();
+                        }
+
+                        // Force-unmount to prevent stale mount
+                        if let Some(ref mp) = disk_mp {
+                            eprintln!("[DISK REMOVED] Force-unmounting {}...", mp);
+                            let _ = std::process::Command::new("bash")
+                                .args([
+                                    "-c",
+                                    &format!(
+                                        "timeout 5 umount -f '{}' 2>/dev/null; \
+                                     timeout 3 rm -rf '{}' 2>/dev/null; true",
+                                        mp, mp
+                                    ),
+                                ])
+                                .output();
+                            eprintln!("[DISK REMOVED] Unmount complete.");
+                        }
+
+                        // Drop the volume lock (release device fd)
+                        drop(disk_vol);
+
+                        eprintln!("[DISK REMOVED] Shutdown complete. Exiting.");
+                        std::process::exit(0);
+                    }
+                }
+            });
+
+            Some(disappeared)
+        } else {
+            warn!(
+                "Could not determine BSD name from device path: {}",
+                device_str
+            );
+            warn!("Disk removal detection is DISABLED for this session.");
+            None
+        }
+    };
 
     println!("Press Ctrl+C to stop.");
 
