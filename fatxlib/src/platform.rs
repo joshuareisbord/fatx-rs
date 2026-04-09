@@ -119,14 +119,20 @@ pub fn configure_device_io(fd: std::os::unix::io::RawFd) -> Option<DeviceInfo> {
     // so we use raw libc::fcntl for these two calls.
     unsafe {
         if libc::fcntl(fd, libc::F_NOCACHE, 1i32) == -1 {
-            warn!("F_NOCACHE failed (non-fatal): {}", std::io::Error::last_os_error());
+            warn!(
+                "F_NOCACHE failed (non-fatal): {}",
+                std::io::Error::last_os_error()
+            );
         } else {
             debug!("F_NOCACHE enabled");
         }
 
         // Disable kernel read-ahead — our app manages its own read patterns.
         if libc::fcntl(fd, libc::F_RDAHEAD, 0i32) == -1 {
-            warn!("F_RDAHEAD(0) failed (non-fatal): {}", std::io::Error::last_os_error());
+            warn!(
+                "F_RDAHEAD(0) failed (non-fatal): {}",
+                std::io::Error::last_os_error()
+            );
         } else {
             debug!("F_RDAHEAD disabled");
         }

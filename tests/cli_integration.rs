@@ -10,7 +10,11 @@ use tempfile::TempDir;
 /// Path to the fatx-mkimage binary
 fn mkimage_bin() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let bin = dir.join("target").join(profile).join("fatx-mkimage");
     if !bin.exists() {
         let status = Command::new("cargo")
@@ -47,7 +51,11 @@ fn create_test_image(size_mb: u32, populate: bool) -> (TempDir, PathBuf) {
         .args(&args)
         .output()
         .expect("run fatx-mkimage");
-    assert!(output.status.success(), "mkimage failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "mkimage failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     (tmp, img)
 }
@@ -64,15 +72,16 @@ fn test_fatx_version() {
         .expect("run fatx --version");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("fatx"), "version should contain 'fatx': {}", stdout);
+    assert!(
+        stdout.contains("fatx"),
+        "version should contain 'fatx': {}",
+        stdout
+    );
 }
 
 #[test]
 fn test_fatx_help() {
-    let output = fatx_bin()
-        .arg("--help")
-        .output()
-        .expect("run fatx --help");
+    let output = fatx_bin().arg("--help").output().expect("run fatx --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("FATX"), "help should mention FATX");
@@ -93,7 +102,11 @@ fn test_cli_ls_empty() {
         .output()
         .expect("run fatx ls");
 
-    assert!(output.status.success(), "fatx ls failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "fatx ls failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -154,7 +167,10 @@ fn test_cli_info() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("FATX Volume Information"), "should show header");
+    assert!(
+        stdout.contains("FATX Volume Information"),
+        "should show header"
+    );
     assert!(stdout.contains("FAT type:"), "should show FAT type");
     assert!(stdout.contains("Free:"), "should show free space");
 }
@@ -171,11 +187,17 @@ fn test_cli_info_json() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let json: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("info --json should produce valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("info --json should produce valid JSON");
 
-    assert!(json["total_clusters"].is_number(), "should have total_clusters");
-    assert!(json["free_clusters"].is_number(), "should have free_clusters");
+    assert!(
+        json["total_clusters"].is_number(),
+        "should have total_clusters"
+    );
+    assert!(
+        json["free_clusters"].is_number(),
+        "should have free_clusters"
+    );
     assert!(json["cluster_size"].is_number(), "should have cluster_size");
 }
 
@@ -186,7 +208,10 @@ fn test_cli_info_nonexistent_file() {
         .output()
         .expect("run fatx info nonexistent");
 
-    assert!(!output.status.success(), "info on nonexistent file should fail");
+    assert!(
+        !output.status.success(),
+        "info on nonexistent file should fail"
+    );
 }
 
 // ===========================================================================
@@ -204,7 +229,10 @@ fn test_cli_read_file() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Test Xbox 360"), "should read file content from populated image");
+    assert!(
+        stdout.contains("Test Xbox 360"),
+        "should read file content from populated image"
+    );
 }
 
 // ===========================================================================
@@ -231,7 +259,11 @@ fn test_cli_write_and_read_roundtrip() {
         .output()
         .expect("run fatx write");
 
-    assert!(output.status.success(), "write failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "write failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Read it back
     let output = fatx_bin()
@@ -266,7 +298,11 @@ fn test_cli_write_large_file() {
         .output()
         .expect("run fatx write large");
 
-    assert!(output.status.success(), "write large failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "write large failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify it's listed
     let output = fatx_bin()
@@ -291,7 +327,11 @@ fn test_cli_mkdir() {
         .output()
         .expect("run fatx mkdir");
 
-    assert!(output.status.success(), "mkdir failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "mkdir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify it's listed
     let output = fatx_bin()
@@ -321,7 +361,11 @@ fn test_cli_mkdir_nested() {
         .output()
         .expect("run fatx mkdir nested");
 
-    assert!(output.status.success(), "nested mkdir failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "nested mkdir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let output = fatx_bin()
         .args(["ls", img.to_str().unwrap(), "/Parent"])
@@ -353,7 +397,11 @@ fn test_cli_rm_file() {
         .output()
         .expect("run fatx rm");
 
-    assert!(output.status.success(), "rm failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify it's gone
     let output = fatx_bin()
@@ -388,7 +436,11 @@ fn test_cli_rename() {
         .output()
         .expect("run fatx rename");
 
-    assert!(output.status.success(), "rename failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "rename failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let output = fatx_bin()
         .args(["ls", img.to_str().unwrap(), "/"])
@@ -414,14 +466,21 @@ fn test_cli_rmr() {
         .output()
         .expect("run fatx rmr");
 
-    assert!(output.status.success(), "rmr failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "rmr failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let output = fatx_bin()
         .args(["ls", img.to_str().unwrap(), "/"])
         .output()
         .unwrap();
 
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Content"), "Content should be deleted");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("Content"),
+        "Content should be deleted"
+    );
 }
 
 // ===========================================================================
@@ -437,7 +496,11 @@ fn test_cli_hexdump() {
         .output()
         .expect("run fatx hexdump");
 
-    assert!(output.status.success(), "hexdump failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "hexdump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Should contain the FATX magic bytes in hex
     assert!(
@@ -461,7 +524,11 @@ fn test_cli_mkimage() {
         .output()
         .expect("run fatx mkimage");
 
-    assert!(output.status.success(), "mkimage failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "mkimage failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(img.exists(), "image file should be created");
 
     // Verify the image is valid by running info on it
@@ -480,11 +547,22 @@ fn test_cli_mkimage_xtaf() {
     let img = tmp.path().join("xbox360.img");
 
     let output = fatx_bin()
-        .args(["mkimage", img.to_str().unwrap(), "--size", "4M", "--format", "xtaf"])
+        .args([
+            "mkimage",
+            img.to_str().unwrap(),
+            "--size",
+            "4M",
+            "--format",
+            "xtaf",
+        ])
         .output()
         .expect("run fatx mkimage xtaf");
 
-    assert!(output.status.success(), "mkimage xtaf failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "mkimage xtaf failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let output = fatx_bin()
         .args(["info", img.to_str().unwrap()])

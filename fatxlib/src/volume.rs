@@ -233,25 +233,37 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                     } else {
                         u16::from_le_bytes([fat_cache[cache_offset], fat_cache[cache_offset + 1]])
                     };
-                    if val == FAT16_FREE { Some(true) }
-                    else if val == FAT16_BAD { Some(false) }
-                    else { None }
+                    if val == FAT16_FREE {
+                        Some(true)
+                    } else if val == FAT16_BAD {
+                        Some(false)
+                    } else {
+                        None
+                    }
                 }
                 FatType::Fat32 => {
                     let val = if is_xtaf {
                         u32::from_be_bytes([
-                            fat_cache[cache_offset], fat_cache[cache_offset + 1],
-                            fat_cache[cache_offset + 2], fat_cache[cache_offset + 3],
+                            fat_cache[cache_offset],
+                            fat_cache[cache_offset + 1],
+                            fat_cache[cache_offset + 2],
+                            fat_cache[cache_offset + 3],
                         ])
                     } else {
                         u32::from_le_bytes([
-                            fat_cache[cache_offset], fat_cache[cache_offset + 1],
-                            fat_cache[cache_offset + 2], fat_cache[cache_offset + 3],
+                            fat_cache[cache_offset],
+                            fat_cache[cache_offset + 1],
+                            fat_cache[cache_offset + 2],
+                            fat_cache[cache_offset + 3],
                         ])
                     };
-                    if val == FAT32_FREE { Some(true) }
-                    else if val == FAT32_BAD { Some(false) }
-                    else { None }
+                    if val == FAT32_FREE {
+                        Some(true)
+                    } else if val == FAT32_BAD {
+                        Some(false)
+                    } else {
+                        None
+                    }
                 }
             };
             match is_free {
@@ -561,7 +573,8 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         // Record dirty range for partial flush
         let entry_size = self.fat_type.entry_size() as usize;
-        self.dirty_ranges.push((cache_offset, cache_offset + entry_size));
+        self.dirty_ranges
+            .push((cache_offset, cache_offset + entry_size));
 
         self.fat_dirty = true;
         Ok(())
@@ -603,7 +616,11 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         }
 
         let end = FIRST_CLUSTER + self.total_clusters;
-        let start_from = if self.prev_free + 1 >= end { FIRST_CLUSTER } else { self.prev_free + 1 };
+        let start_from = if self.prev_free + 1 >= end {
+            FIRST_CLUSTER
+        } else {
+            self.prev_free + 1
+        };
 
         if let Some(cluster) = self.bitmap_find_free(start_from, end) {
             self.write_fat_entry(cluster, FatEntry::EndOfChain)?;
@@ -632,20 +649,26 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         for word_idx in start_word..end_word.min(self.free_bitmap.len()) {
             let mut word = self.free_bitmap[word_idx];
-            if word == 0 { continue; }
+            if word == 0 {
+                continue;
+            }
 
             // Mask out bits before `from` in the starting word
             if word_idx == start_word {
                 let start_bit = from % 64;
                 word &= !((1u64 << start_bit) - 1);
-                if word == 0 { continue; }
+                if word == 0 {
+                    continue;
+                }
             }
 
             // Find first set bit
             let bit = word.trailing_zeros() as usize;
             let cluster = word_idx * 64 + bit;
 
-            if cluster >= to { return None; }
+            if cluster >= to {
+                return None;
+            }
             return Some(cluster as u32);
         }
         None
@@ -663,7 +686,11 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         }
 
         let end = FIRST_CLUSTER + self.total_clusters;
-        let start_from = if self.prev_free + 1 >= end { FIRST_CLUSTER } else { self.prev_free + 1 };
+        let start_from = if self.prev_free + 1 >= end {
+            FIRST_CLUSTER
+        } else {
+            self.prev_free + 1
+        };
 
         let mut allocated = Vec::with_capacity(count);
         let mut cursor = start_from;
@@ -1086,16 +1113,8 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         // Create directory entry — use UTC so Xbox displays correct local time
         let now = time::OffsetDateTime::now_utc();
-        let date = DirectoryEntry::encode_date(
-            now.year() as u16,
-            now.month() as u8,
-            now.day(),
-        );
-        let time = DirectoryEntry::encode_time(
-            now.hour(),
-            now.minute(),
-            now.second(),
-        );
+        let date = DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
+        let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
 
         let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
         let name_bytes = filename.as_bytes();
@@ -1150,16 +1169,8 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         // Use UTC so Xbox displays correct local time
         let now = time::OffsetDateTime::now_utc();
-        let date = DirectoryEntry::encode_date(
-            now.year() as u16,
-            now.month() as u8,
-            now.day(),
-        );
-        let time = DirectoryEntry::encode_time(
-            now.hour(),
-            now.minute(),
-            now.second(),
-        );
+        let date = DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
+        let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
 
         let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
         let name_bytes = dirname.as_bytes();
@@ -1225,7 +1236,11 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             // Allocate additional clusters using bitmap scan from prev_free
             let mut new_clusters = Vec::with_capacity(extra);
             let end = FIRST_CLUSTER + self.total_clusters;
-            let start_from = if self.prev_free + 1 >= end { FIRST_CLUSTER } else { self.prev_free + 1 };
+            let start_from = if self.prev_free + 1 >= end {
+                FIRST_CLUSTER
+            } else {
+                self.prev_free + 1
+            };
             let mut cursor = start_from;
 
             // Pass 1: from prev_free+1 to end
@@ -1325,7 +1340,11 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         }
 
         let cluster_size = self.superblock.cluster_size() as usize;
-        let clusters_needed = if new_size == 0 { 1 } else { new_size.div_ceil(cluster_size) };
+        let clusters_needed = if new_size == 0 {
+            1
+        } else {
+            new_size.div_ceil(cluster_size)
+        };
 
         let old_chain = self.read_chain(target.first_cluster)?;
         let old_count = old_chain.len();
@@ -1336,13 +1355,20 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             let last_old = *old_chain.last().unwrap();
 
             let end = FIRST_CLUSTER + self.total_clusters;
-            let start_from = if self.prev_free + 1 >= end { FIRST_CLUSTER } else { self.prev_free + 1 };
+            let start_from = if self.prev_free + 1 >= end {
+                FIRST_CLUSTER
+            } else {
+                self.prev_free + 1
+            };
             let mut new_clusters = Vec::with_capacity(extra);
             let mut cursor = start_from;
 
             while new_clusters.len() < extra {
                 match self.bitmap_find_free(cursor, end) {
-                    Some(c) => { new_clusters.push(c); cursor = c + 1; }
+                    Some(c) => {
+                        new_clusters.push(c);
+                        cursor = c + 1;
+                    }
                     None => break,
                 }
             }
@@ -1350,7 +1376,10 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 cursor = FIRST_CLUSTER;
                 while new_clusters.len() < extra {
                     match self.bitmap_find_free(cursor, start_from) {
-                        Some(c) => { new_clusters.push(c); cursor = c + 1; }
+                        Some(c) => {
+                            new_clusters.push(c);
+                            cursor = c + 1;
+                        }
                         None => break,
                     }
                 }
@@ -1635,17 +1664,22 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 self.inner.seek(SeekFrom::Start(aligned_start))?;
                 let mut buf = vec![0u8; aligned_len];
                 if let Err(e) = self.inner.read_exact(&mut buf) {
-                    warn!("Dirty-range flush read failed at offset 0x{:X}: {}", aligned_start, e);
+                    warn!(
+                        "Dirty-range flush read failed at offset 0x{:X}: {}",
+                        aligned_start, e
+                    );
                     failed = true;
                     break;
                 }
 
-                buf[pre_skip..pre_skip + range_len]
-                    .copy_from_slice(&self.fat_cache[*start..*end]);
+                buf[pre_skip..pre_skip + range_len].copy_from_slice(&self.fat_cache[*start..*end]);
 
                 self.inner.seek(SeekFrom::Start(aligned_start))?;
                 if let Err(e) = self.inner.write_all(&buf) {
-                    warn!("Dirty-range flush write failed at offset 0x{:X}: {}", aligned_start, e);
+                    warn!(
+                        "Dirty-range flush write failed at offset 0x{:X}: {}",
+                        aligned_start, e
+                    );
                     failed = true;
                     break;
                 }

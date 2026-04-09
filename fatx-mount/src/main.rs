@@ -576,7 +576,8 @@ impl NFSFileSystem for FatxNfs {
         {
             let dirty = self.dirty_files.lock();
             if let Some((_, ref buf_data)) = dirty.get(&cluster) {
-                self.file_cache.insert(cluster, Bytes::copy_from_slice(buf_data));
+                self.file_cache
+                    .insert(cluster, Bytes::copy_from_slice(buf_data));
             }
         }
 
@@ -1487,7 +1488,9 @@ async fn main() {
                                 }
                                 // Lock released — NFS reads can proceed
                                 offset += cluster_size;
-                                if offset >= data.len() { break; }
+                                if offset >= data.len() {
+                                    break;
+                                }
                             }
 
                             // Update file cache with the flushed data

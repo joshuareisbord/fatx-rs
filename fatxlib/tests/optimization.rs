@@ -18,7 +18,12 @@ fn test_prev_free_allocates_forward() {
     // Allocate two clusters — second should have a higher index than first
     let c1 = vol.allocate_cluster().expect("alloc 1");
     let c2 = vol.allocate_cluster().expect("alloc 2");
-    assert!(c2 > c1, "next-fit: second cluster {} should be after first {}", c2, c1);
+    assert!(
+        c2 > c1,
+        "next-fit: second cluster {} should be after first {}",
+        c2,
+        c1
+    );
 }
 
 #[test]
@@ -34,7 +39,12 @@ fn test_prev_free_after_free_still_advances() {
 
     // Next allocation should NOT go back to c1 — it should continue forward
     let c4 = vol.allocate_cluster().expect("alloc 4");
-    assert!(c4 > c3, "prev_free should advance past freed cluster: c4={} should be > c3={}", c4, c3);
+    assert!(
+        c4 > c3,
+        "prev_free should advance past freed cluster: c4={} should be > c3={}",
+        c4,
+        c3
+    );
 }
 
 #[test]
@@ -156,7 +166,8 @@ fn test_flush_after_no_changes_is_noop() {
 fn test_flush_after_create_preserves_data() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
-    vol.create_file("/dirty.txt", b"dirty range test data").expect("create");
+    vol.create_file("/dirty.txt", b"dirty range test data")
+        .expect("create");
     vol.flush().expect("flush");
 
     // Read back to verify data survived the flush
@@ -171,7 +182,8 @@ fn test_flush_after_create_delete_no_corruption() {
     // Create several files
     vol.create_file("/a.txt", b"file a").expect("create a");
     vol.create_file("/b.txt", b"file b").expect("create b");
-    vol.create_file("/c.txt", &vec![0xCC; 65536]).expect("create c");
+    vol.create_file("/c.txt", &vec![0xCC; 65536])
+        .expect("create c");
 
     // Delete one
     vol.delete("/b.txt").expect("delete b");
@@ -198,7 +210,8 @@ fn test_stats_decrements_on_create() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
     let before = vol.stats().expect("stats").free_clusters;
-    vol.create_file("/test.bin", &vec![0u8; 16384]).expect("create"); // 1 cluster
+    vol.create_file("/test.bin", &vec![0u8; 16384])
+        .expect("create"); // 1 cluster
     let after = vol.stats().expect("stats").free_clusters;
 
     assert!(after < before, "free count should decrease after create");
@@ -208,7 +221,8 @@ fn test_stats_decrements_on_create() {
 fn test_stats_increments_on_delete() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
-    vol.create_file("/test.bin", &vec![0u8; 16384]).expect("create");
+    vol.create_file("/test.bin", &vec![0u8; 16384])
+        .expect("create");
     let before = vol.stats().expect("stats").free_clusters;
 
     vol.delete("/test.bin").expect("delete");
@@ -222,8 +236,10 @@ fn test_stats_matches_manual_count() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
     // Create some files to make it interesting
-    vol.create_file("/a.bin", &vec![0u8; 32768]).expect("create a");
-    vol.create_file("/b.bin", &vec![0u8; 16384]).expect("create b");
+    vol.create_file("/a.bin", &vec![0u8; 32768])
+        .expect("create a");
+    vol.create_file("/b.bin", &vec![0u8; 16384])
+        .expect("create b");
 
     let stats = vol.stats().expect("stats");
 
@@ -237,8 +253,14 @@ fn test_stats_matches_manual_count() {
         }
     }
 
-    assert_eq!(stats.free_clusters, manual_free, "cached free count should match manual scan");
-    assert_eq!(stats.used_clusters, manual_used, "cached used count should match manual scan");
+    assert_eq!(
+        stats.free_clusters, manual_free,
+        "cached free count should match manual scan"
+    );
+    assert_eq!(
+        stats.used_clusters, manual_used,
+        "cached used count should match manual scan"
+    );
 }
 
 // ===========================================================================
@@ -251,7 +273,8 @@ fn test_default_alignment_works() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
     // Basic read/write should work with default alignment
-    vol.create_file("/align.txt", b"alignment test").expect("create");
+    vol.create_file("/align.txt", b"alignment test")
+        .expect("create");
     let data = vol.read_file_by_path("/align.txt").expect("read");
     assert_eq!(data, b"alignment test");
 }
@@ -262,14 +285,26 @@ fn test_read_write_at_various_offsets() {
 
     // Create files of various sizes to exercise different alignment scenarios
     vol.create_file("/tiny.txt", b"x").expect("create tiny");
-    vol.create_file("/small.txt", &vec![0xBB; 511]).expect("create small");
-    vol.create_file("/aligned.txt", &vec![0xCC; 512]).expect("create aligned");
-    vol.create_file("/large.txt", &vec![0xDD; 4097]).expect("create large");
+    vol.create_file("/small.txt", &vec![0xBB; 511])
+        .expect("create small");
+    vol.create_file("/aligned.txt", &vec![0xCC; 512])
+        .expect("create aligned");
+    vol.create_file("/large.txt", &vec![0xDD; 4097])
+        .expect("create large");
 
     assert_eq!(vol.read_file_by_path("/tiny.txt").expect("read"), b"x");
-    assert_eq!(vol.read_file_by_path("/small.txt").expect("read"), vec![0xBB; 511]);
-    assert_eq!(vol.read_file_by_path("/aligned.txt").expect("read"), vec![0xCC; 512]);
-    assert_eq!(vol.read_file_by_path("/large.txt").expect("read"), vec![0xDD; 4097]);
+    assert_eq!(
+        vol.read_file_by_path("/small.txt").expect("read"),
+        vec![0xBB; 511]
+    );
+    assert_eq!(
+        vol.read_file_by_path("/aligned.txt").expect("read"),
+        vec![0xCC; 512]
+    );
+    assert_eq!(
+        vol.read_file_by_path("/large.txt").expect("read"),
+        vec![0xDD; 4097]
+    );
 }
 
 // ===========================================================================
@@ -284,7 +319,11 @@ fn test_xtaf_stats_and_allocation() {
     assert!(stats.free_clusters > 0);
 
     let before = stats.free_clusters;
-    vol.create_file("/xtaf_test.bin", &vec![0u8; 32768]).expect("create");
+    vol.create_file("/xtaf_test.bin", &vec![0u8; 32768])
+        .expect("create");
     let after = vol.stats().expect("stats").free_clusters;
-    assert!(after < before, "XTAF: free count should decrease after create");
+    assert!(
+        after < before,
+        "XTAF: free count should decrease after create"
+    );
 }

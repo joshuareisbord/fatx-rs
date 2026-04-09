@@ -46,11 +46,7 @@ fn mkimage_bin() -> PathBuf {
 ///
 /// # Returns
 /// `(TempDir, FatxVolume<File>)` — TempDir must be kept alive for the duration of the test.
-pub fn create_image(
-    size_mb: u32,
-    format: &str,
-    populate: bool,
-) -> (TempDir, FatxVolume<File>) {
+pub fn create_image(size_mb: u32, format: &str, populate: bool) -> (TempDir, FatxVolume<File>) {
     let tmp_dir = TempDir::new().expect("create temp dir");
     let img_path = tmp_dir.path().join("test.img");
 

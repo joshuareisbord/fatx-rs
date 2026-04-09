@@ -16,7 +16,10 @@ use fatxlib::volume::FatxVolume;
 fn test_open_volume() {
     let (_tmp, vol) = common::create_fatx_image(2);
     assert!(vol.superblock.is_valid());
-    assert!(vol.superblock.volume_id != 0, "volume ID should be non-zero");
+    assert!(
+        vol.superblock.volume_id != 0,
+        "volume ID should be non-zero"
+    );
     assert_eq!(vol.superblock.sectors_per_cluster, 32);
     assert_eq!(vol.fat_type, FatType::Fat16);
 }
@@ -26,7 +29,10 @@ fn test_open_xtaf_volume() {
     let (_tmp, vol) = common::create_xtaf_image(2);
     assert!(vol.superblock.is_valid());
     assert_eq!(&vol.superblock.magic, b"XTAF");
-    assert!(vol.superblock.volume_id != 0, "volume ID should be non-zero");
+    assert!(
+        vol.superblock.volume_id != 0,
+        "volume ID should be non-zero"
+    );
     assert_eq!(vol.fat_type, FatType::Fat16);
 }
 
@@ -40,7 +46,10 @@ fn test_open_volume_with_offset() {
     drop(_vol); // close the volume so we can read the raw file
 
     let mut raw = Vec::new();
-    std::fs::File::open(&img_path).unwrap().read_to_end(&mut raw).unwrap();
+    std::fs::File::open(&img_path)
+        .unwrap()
+        .read_to_end(&mut raw)
+        .unwrap();
 
     let offset = 0x10000usize; // 64 KB offset
     let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -51,7 +60,11 @@ fn test_open_volume_with_offset() {
         f.write_all(&raw).unwrap();
     }
 
-    let file = std::fs::OpenOptions::new().read(true).write(true).open(&padded_path).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&padded_path)
+        .unwrap();
     let vol = FatxVolume::open(file, offset as u64, raw.len() as u64).expect("open with offset");
     assert!(vol.superblock.is_valid());
 }

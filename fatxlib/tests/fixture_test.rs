@@ -21,11 +21,23 @@ fn test_fixture_creates_xtaf_volume() {
 fn test_fixture_creates_populated_volume() {
     let (_tmp, mut vol) = common::create_populated_image(256);
     let entries = vol.read_root_directory().unwrap();
-    assert!(!entries.is_empty(), "populated image should have files in root");
+    assert!(
+        !entries.is_empty(),
+        "populated image should have files in root"
+    );
 
     // Check expected directories from mkimage --populate
     let names: Vec<String> = entries.iter().map(|e| e.filename()).collect();
-    assert!(names.contains(&"Content".to_string()), "should have Content dir");
-    assert!(names.contains(&"Cache".to_string()), "should have Cache dir");
-    assert!(names.contains(&"name.txt".to_string()), "should have name.txt");
+    assert!(
+        names.contains(&"Content".to_string()),
+        "should have Content dir"
+    );
+    assert!(
+        names.contains(&"Cache".to_string()),
+        "should have Cache dir"
+    );
+    assert!(
+        names.contains(&"name.txt".to_string()),
+        "should have name.txt"
+    );
 }
