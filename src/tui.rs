@@ -1,22 +1,32 @@
 //! TUI file browser for FATX volumes.
 //!
-//! Single-pane browser with keyboard navigation:
+//! Architecture: two-thread model with channel communication.
+//! - UI thread: draws the terminal, reads keypresses, sends commands
+//! - I/O thread: owns FatxVolume, executes commands, sends responses
+//!
+//! Keyboard:
 //!   ↑/↓       Navigate file list
 //!   Enter      Open directory / select file
 //!   Backspace  Go up one directory
 //!   d          Download selected file to local disk
-//!   u          Upload a local file to current directory
+//!   u          Upload a local file or directory to current directory
 //!   n          Create new directory
 //!   D          Delete selected file/directory
 //!   r          Rename selected file/directory
 //!   i          Show volume info
-//!   q/Esc      Quit
+//!   Esc        Cancel running operation / Quit
+//!   q          Quit
 
 use std::fs;
 use std::io::{self, stdout};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::{
+    cursor::{Hide, Show},
     event::{self, Event, KeyCode, KeyEvent},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
@@ -30,7 +40,10 @@ use fatxlib::partition::format_size;
 use fatxlib::types::FileAttributes;
 use fatxlib::volume::FatxVolume;
 
-/// A directory entry for display in the TUI.
+// ===========================================================================
+// Display types
+// ===========================================================================
+
 #[allow(dead_code)]
 struct DisplayEntry {
     name: String,
@@ -41,35 +54,79 @@ struct DisplayEntry {
     first_cluster: u32,
 }
 
-/// Application state for the TUI browser.
-struct App {
-    /// Current working directory path on the FATX volume.
-    cwd: String,
-    /// Entries in the current directory.
-    entries: Vec<DisplayEntry>,
-    /// Selection state for the list widget.
-    list_state: ListState,
-    /// Status message shown at the bottom.
-    status: String,
-    /// Whether to show the status as an error.
-    status_is_error: bool,
-    /// Partition name for display.
-    partition_name: String,
-    /// Device path for display.
-    device_display: String,
-    /// Whether app should quit.
-    should_quit: bool,
-    /// Input mode (for text prompts).
-    input_mode: InputMode,
-    /// Current text input buffer.
-    input_buffer: String,
-    /// Prompt text for input mode.
-    input_prompt: String,
-    /// Default download directory.
-    download_dir: PathBuf,
+// ===========================================================================
+// Channel protocol
+// ===========================================================================
+
+/// Commands sent from UI thread → I/O thread.
+enum IoCmd {
+    ListDir {
+        path: String,
+    },
+    ReadFile {
+        fatx_path: String,
+        local_path: PathBuf,
+    },
+    WriteFile {
+        local_path: PathBuf,
+        fatx_path: String,
+    },
+    CopyDir {
+        local_path: PathBuf,
+        fatx_dest: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    Delete {
+        path: String,
+        recursive: bool,
+    },
+    Rename {
+        path: String,
+        new_name: String,
+    },
+    Stats,
+    Flush,
+    Shutdown,
 }
 
+/// Responses sent from I/O thread → UI thread.
+#[allow(dead_code)]
+enum IoResp {
+    DirListing {
+        entries: Vec<DisplayEntry>,
+        path: String,
+    },
+    Progress {
+        message: String,
+    },
+    Done {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
+    StatsResult {
+        total_clusters: u32,
+        free_clusters: u32,
+        used_clusters: u32,
+        cluster_size: u64,
+        free_size: u64,
+        used_size: u64,
+    },
+    Flushed,
+    Cancelled {
+        message: String,
+    },
+}
+
+// ===========================================================================
+// App state
+// ===========================================================================
+
 #[derive(PartialEq)]
+#[allow(dead_code)]
 enum InputMode {
     Normal,
     DownloadPath,
@@ -79,9 +136,33 @@ enum InputMode {
     ConfirmDelete,
 }
 
+struct App {
+    cwd: String,
+    entries: Vec<DisplayEntry>,
+    list_state: ListState,
+    status: String,
+    status_is_error: bool,
+    partition_name: String,
+    device_display: String,
+    should_quit: bool,
+    input_mode: InputMode,
+    input_buffer: String,
+    input_prompt: String,
+    download_dir: PathBuf,
+    /// True when an I/O operation is running in the background.
+    is_busy: bool,
+    /// Shared cancel flag — set by UI, checked by I/O worker.
+    cancel_flag: Arc<AtomicBool>,
+}
+
+fn dirs_or_home() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
 impl App {
-    fn new(partition_name: &str, device_display: &str) -> Self {
-        let download_dir = dirs_or_home();
+    fn new(partition_name: &str, device_display: &str, cancel_flag: Arc<AtomicBool>) -> Self {
         Self {
             cwd: "/".to_string(),
             entries: Vec::new(),
@@ -94,7 +175,9 @@ impl App {
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             input_prompt: String::new(),
-            download_dir,
+            download_dir: dirs_or_home(),
+            is_busy: false,
+            cancel_flag,
         }
     }
 
@@ -125,118 +208,429 @@ impl App {
     }
 }
 
-fn dirs_or_home() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join("Desktop")
-    } else {
-        PathBuf::from(".")
-    }
-}
+// ===========================================================================
+// I/O Worker Thread
+// ===========================================================================
 
-/// Refresh directory listing from the volume.
-fn refresh_entries(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
-    let entry = match vol.resolve_path(&app.cwd) {
-        Ok(e) => e,
-        Err(e) => {
-            app.set_error(&format!("Error: {}", e));
-            return;
-        }
-    };
-
-    match vol.read_directory(entry.first_cluster) {
-        Ok(entries) => {
-            app.entries = entries
-                .iter()
-                .map(|e| {
-                    let attr = format!(
-                        "{}{}{}{}",
-                        if e.is_directory() { "d" } else { "-" },
-                        if e.attributes.contains(FileAttributes::READ_ONLY) {
-                            "r"
-                        } else {
-                            "-"
-                        },
-                        if e.attributes.contains(FileAttributes::HIDDEN) {
-                            "h"
-                        } else {
-                            "-"
-                        },
-                        if e.attributes.contains(FileAttributes::SYSTEM) {
-                            "s"
-                        } else {
-                            "-"
-                        },
-                    );
-                    DisplayEntry {
-                        name: e.filename(),
-                        is_dir: e.is_directory(),
-                        size: e.file_size as u64,
-                        modified: e.write_datetime_str(),
-                        attributes: attr,
-                        first_cluster: e.first_cluster,
+fn io_worker(
+    mut vol: FatxVolume<std::fs::File>,
+    cmd_rx: mpsc::Receiver<IoCmd>,
+    resp_tx: mpsc::Sender<IoResp>,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    while let Ok(cmd) = cmd_rx.recv() {
+        match cmd {
+            IoCmd::ListDir { path } => {
+                let entry = match vol.resolve_path(&path) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = resp_tx.send(IoResp::Error {
+                            message: format!("Error: {}", e),
+                        });
+                        continue;
                     }
-                })
-                .collect();
+                };
 
-            // Sort: directories first, then alphabetical
-            app.entries.sort_by(|a, b| {
-                b.is_dir
-                    .cmp(&a.is_dir)
-                    .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            });
+                match vol.read_directory(entry.first_cluster) {
+                    Ok(entries) => {
+                        let mut display: Vec<DisplayEntry> = entries
+                            .iter()
+                            .map(|e| {
+                                let attr = format!(
+                                    "{}{}{}{}",
+                                    if e.is_directory() { "d" } else { "-" },
+                                    if e.attributes.contains(FileAttributes::READ_ONLY) {
+                                        "r"
+                                    } else {
+                                        "-"
+                                    },
+                                    if e.attributes.contains(FileAttributes::HIDDEN) {
+                                        "h"
+                                    } else {
+                                        "-"
+                                    },
+                                    if e.attributes.contains(FileAttributes::SYSTEM) {
+                                        "s"
+                                    } else {
+                                        "-"
+                                    },
+                                );
+                                DisplayEntry {
+                                    name: e.filename(),
+                                    is_dir: e.is_directory(),
+                                    size: e.file_size as u64,
+                                    modified: e.write_datetime_str(),
+                                    attributes: attr,
+                                    first_cluster: e.first_cluster,
+                                }
+                            })
+                            .collect();
 
-            let count = app.entries.len();
-            app.set_status(&format!(
-                "{} item(s) — ↑↓ navigate, Enter open, d download, u upload, q quit",
-                count
-            ));
+                        display.sort_by(|a, b| {
+                            b.is_dir
+                                .cmp(&a.is_dir)
+                                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                        });
 
-            // Reset selection
-            if !app.entries.is_empty() {
-                app.list_state.select(Some(0));
-            } else {
-                app.list_state.select(None);
-                app.set_status(
-                    "(empty directory) — Backspace to go up, u to upload, n to mkdir, q to quit",
-                );
+                        let _ = resp_tx.send(IoResp::DirListing {
+                            entries: display,
+                            path,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = resp_tx.send(IoResp::Error {
+                            message: format!("Error reading directory: {}", e),
+                        });
+                    }
+                }
+            }
+
+            IoCmd::ReadFile {
+                fatx_path,
+                local_path,
+            } => match vol.read_file_by_path(&fatx_path) {
+                Ok(data) => {
+                    if let Some(parent) = local_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    match fs::write(&local_path, &data) {
+                        Ok(_) => {
+                            let _ = resp_tx.send(IoResp::Done {
+                                message: format!(
+                                    "Downloaded '{}' → {} ({})",
+                                    fatx_path,
+                                    local_path.display(),
+                                    format_size(data.len() as u64)
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = resp_tx.send(IoResp::Error {
+                                message: format!("Write error: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = resp_tx.send(IoResp::Error {
+                        message: format!("Read error: {}", e),
+                    });
+                }
+            },
+
+            IoCmd::WriteFile {
+                local_path,
+                fatx_path,
+            } => match fs::read(&local_path) {
+                Ok(data) => {
+                    let size = data.len() as u64;
+                    match vol.create_file(&fatx_path, &data) {
+                        Ok(_) => {
+                            let _ = vol.flush();
+                            let _ = resp_tx.send(IoResp::Done {
+                                message: format!(
+                                    "Uploaded '{}' → {} ({})",
+                                    local_path.display(),
+                                    fatx_path,
+                                    format_size(size)
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = resp_tx.send(IoResp::Error {
+                                message: format!("Upload error: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = resp_tx.send(IoResp::Error {
+                        message: format!("Read local error: {}", e),
+                    });
+                }
+            },
+
+            IoCmd::CopyDir {
+                local_path,
+                fatx_dest,
+            } => {
+                // Collect all files first
+                let mut file_list: Vec<(PathBuf, String)> = Vec::new();
+                collect_files(&local_path, &fatx_dest, &mut file_list);
+                let total_files = file_list.len();
+                let total_size: u64 = file_list
+                    .iter()
+                    .filter_map(|(p, _)| fs::metadata(p).ok().map(|m| m.len()))
+                    .sum();
+
+                // Create directory structure
+                create_dirs_recursive(&mut vol, &local_path, &fatx_dest);
+
+                cancel_flag.store(false, Ordering::Relaxed);
+                let mut bytes_done = 0u64;
+                let mut files_done = 0usize;
+                let mut cancelled = false;
+
+                for (local_file, fatx_path) in &file_list {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        cancelled = true;
+                        break;
+                    }
+
+                    let file_size = fs::metadata(local_file).map(|m| m.len()).unwrap_or(0);
+                    files_done += 1;
+
+                    let _ = resp_tx.send(IoResp::Progress {
+                        message: format!(
+                            "Uploading [{}/{}] {} ({}/{})",
+                            files_done,
+                            total_files,
+                            fatx_path,
+                            format_size(bytes_done),
+                            format_size(total_size),
+                        ),
+                    });
+
+                    match fs::read(local_file) {
+                        Ok(data) => match vol.create_file(fatx_path, &data) {
+                            Ok(_) => {
+                                bytes_done += file_size;
+                            }
+                            Err(e) => {
+                                let _ = vol.flush();
+                                let _ = resp_tx.send(IoResp::Error {
+                                    message: format!("{}: {}", fatx_path, e),
+                                });
+                                // Continue to next file instead of aborting entirely
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            let _ = resp_tx.send(IoResp::Error {
+                                message: format!("Read {}: {}", local_file.display(), e),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                let _ = vol.flush();
+
+                if cancelled {
+                    let _ = resp_tx.send(IoResp::Cancelled {
+                        message: format!(
+                            "Cancelled — {}/{} files uploaded ({})",
+                            files_done.saturating_sub(1),
+                            total_files,
+                            format_size(bytes_done)
+                        ),
+                    });
+                } else {
+                    let _ = resp_tx.send(IoResp::Done {
+                        message: format!(
+                            "Uploaded {} files ({})",
+                            files_done,
+                            format_size(bytes_done)
+                        ),
+                    });
+                }
+            }
+
+            IoCmd::Mkdir { path } => match vol.create_directory(&path) {
+                Ok(_) => {
+                    let _ = vol.flush();
+                    let _ = resp_tx.send(IoResp::Done {
+                        message: format!("Created directory '{}'", path),
+                    });
+                }
+                Err(e) => {
+                    let _ = resp_tx.send(IoResp::Error {
+                        message: format!("Mkdir error: {}", e),
+                    });
+                }
+            },
+
+            IoCmd::Delete { path, recursive } => {
+                let result = if recursive {
+                    vol.delete_recursive(&path)
+                } else {
+                    vol.delete(&path)
+                };
+                match result {
+                    Ok(_) => {
+                        let _ = vol.flush();
+                        let _ = resp_tx.send(IoResp::Done {
+                            message: format!("Deleted '{}'", path),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = resp_tx.send(IoResp::Error {
+                            message: format!("Delete error: {}", e),
+                        });
+                    }
+                }
+            }
+
+            IoCmd::Rename { path, new_name } => match vol.rename(&path, &new_name) {
+                Ok(_) => {
+                    let _ = vol.flush();
+                    let _ = resp_tx.send(IoResp::Done {
+                        message: format!("Renamed → '{}'", new_name),
+                    });
+                }
+                Err(e) => {
+                    let _ = resp_tx.send(IoResp::Error {
+                        message: format!("Rename error: {}", e),
+                    });
+                }
+            },
+
+            IoCmd::Stats => match vol.stats() {
+                Ok(stats) => {
+                    let _ = resp_tx.send(IoResp::StatsResult {
+                        total_clusters: stats.total_clusters,
+                        free_clusters: stats.free_clusters,
+                        used_clusters: stats.used_clusters,
+                        cluster_size: stats.cluster_size,
+                        free_size: stats.free_size,
+                        used_size: stats.used_size,
+                    });
+                }
+                Err(e) => {
+                    let _ = resp_tx.send(IoResp::Error {
+                        message: format!("Stats error: {}", e),
+                    });
+                }
+            },
+
+            IoCmd::Flush => {
+                let _ = vol.flush();
+                let _ = resp_tx.send(IoResp::Flushed);
+            }
+
+            IoCmd::Shutdown => {
+                let _ = vol.flush();
+                break;
             }
         }
-        Err(e) => {
-            app.set_error(&format!("Error reading directory: {}", e));
-            app.entries.clear();
+    }
+}
+
+/// Recursively collect all files from a local directory into a flat list.
+fn collect_files(local_dir: &PathBuf, fatx_dir: &str, out: &mut Vec<(PathBuf, String)>) {
+    let entries = match fs::read_dir(local_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let local_child = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let fatx_child = format!("{}/{}", fatx_dir, name);
+
+        if local_child.is_dir() {
+            collect_files(&local_child, &fatx_child, out);
+        } else if local_child.is_file() {
+            out.push((local_child, fatx_child));
         }
     }
 }
 
-/// Main entry point — run the TUI browser.
+/// Recursively create directory structure on the FATX volume.
+fn create_dirs_recursive(vol: &mut FatxVolume<std::fs::File>, local_dir: &PathBuf, fatx_dir: &str) {
+    match vol.create_directory(fatx_dir) {
+        Ok(_) => {}
+        Err(fatxlib::error::FatxError::FileExists(_)) => {}
+        Err(_) => return,
+    }
+    let entries = match fs::read_dir(local_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let fatx_child = format!("{}/{}", fatx_dir, name);
+            create_dirs_recursive(vol, &entry.path(), &fatx_child);
+        }
+    }
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+
 pub fn run_browser(
-    vol: &mut FatxVolume<std::fs::File>,
+    vol: FatxVolume<std::fs::File>,
     partition_name: &str,
     device_display: &str,
 ) -> io::Result<()> {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    // Create channels
+    let (cmd_tx, cmd_rx) = mpsc::channel::<IoCmd>();
+    let (resp_tx, resp_rx) = mpsc::channel::<IoResp>();
+
+    // Spawn I/O worker thread
+    let worker_cancel = Arc::clone(&cancel_flag);
+    let worker_handle = std::thread::spawn(move || {
+        io_worker(vol, cmd_rx, resp_tx, worker_cancel);
+    });
+
     // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let mut app = App::new(partition_name, device_display);
-    refresh_entries(&mut app, vol);
+    let mut app = App::new(partition_name, device_display, Arc::clone(&cancel_flag));
 
-    // Main loop
+    // Initial directory listing
+    let _ = cmd_tx.send(IoCmd::ListDir {
+        path: "/".to_string(),
+    });
+    app.is_busy = true;
+
+    // Main loop — non-blocking with 50ms poll
     loop {
+        // Show/hide terminal cursor based on input mode
+        if app.input_mode != InputMode::Normal {
+            stdout().execute(Show)?;
+        } else {
+            stdout().execute(Hide)?;
+        }
+
         terminal.draw(|frame| ui(frame, &mut app))?;
 
         if app.should_quit {
             break;
         }
 
-        if let Event::Key(key) = event::read()? {
-            match app.input_mode {
-                InputMode::Normal => handle_normal_key(&mut app, vol, key),
-                _ => handle_input_key(&mut app, vol, key),
+        // Process all pending I/O responses (non-blocking)
+        while let Ok(resp) = resp_rx.try_recv() {
+            handle_io_response(&mut app, &cmd_tx, resp);
+        }
+
+        // Poll for key events (50ms timeout — ~20fps refresh)
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if app.is_busy {
+                    // Only allow Esc (cancel) while busy
+                    if key.code == KeyCode::Esc {
+                        app.cancel_flag.store(true, Ordering::Relaxed);
+                        app.set_status("Cancelling...");
+                    }
+                } else {
+                    match app.input_mode {
+                        InputMode::Normal => handle_normal_key(&mut app, &cmd_tx, key),
+                        _ => handle_input_key(&mut app, &cmd_tx, key),
+                    }
+                }
             }
         }
     }
+
+    // Shutdown I/O worker
+    let _ = cmd_tx.send(IoCmd::Shutdown);
+    let _ = worker_handle.join();
 
     // Restore terminal
     disable_raw_mode()?;
@@ -245,12 +639,100 @@ pub fn run_browser(
     Ok(())
 }
 
-/// Handle keys in normal browsing mode.
-fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: KeyEvent) {
+// ===========================================================================
+// Response handler
+// ===========================================================================
+
+fn handle_io_response(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, resp: IoResp) {
+    match resp {
+        IoResp::DirListing { entries, path } => {
+            let count = entries.len();
+            app.cwd = path;
+            app.entries = entries;
+            app.is_busy = false;
+
+            if !app.entries.is_empty() {
+                app.list_state.select(Some(0));
+                app.set_status(&format!(
+                    "{} item(s) — ↑↓ navigate, Enter open, d download, u upload, q quit",
+                    count
+                ));
+            } else {
+                app.list_state.select(None);
+                app.set_status(
+                    "(empty directory) — Backspace to go up, u to upload, n to mkdir, q to quit",
+                );
+            }
+        }
+
+        IoResp::Progress { message } => {
+            app.set_status(&message);
+            // Stay busy — more progress or Done/Error/Cancelled will follow
+        }
+
+        IoResp::Done { message } => {
+            app.is_busy = false;
+            app.set_status(&message);
+            // Refresh directory listing
+            let _ = cmd_tx.send(IoCmd::ListDir {
+                path: app.cwd.clone(),
+            });
+            app.is_busy = true;
+        }
+
+        IoResp::Error { message } => {
+            app.is_busy = false;
+            app.set_error(&message);
+        }
+
+        IoResp::StatsResult {
+            total_clusters,
+            free_clusters,
+            cluster_size: _,
+            free_size,
+            used_size,
+            used_clusters: _,
+        } => {
+            app.is_busy = false;
+            app.set_status(&format!(
+                "Volume: {} | Used: {} | Free: {} | Clusters: {}/{}",
+                app.partition_name,
+                format_size(used_size),
+                format_size(free_size),
+                total_clusters - free_clusters,
+                total_clusters,
+            ));
+        }
+
+        IoResp::Flushed => {
+            app.is_busy = false;
+            // Flushed before quit
+            app.should_quit = true;
+        }
+
+        IoResp::Cancelled { message } => {
+            app.is_busy = false;
+            app.cancel_flag.store(false, Ordering::Relaxed);
+            app.set_status(&message);
+            // Refresh directory listing
+            let _ = cmd_tx.send(IoCmd::ListDir {
+                path: app.cwd.clone(),
+            });
+            app.is_busy = true;
+        }
+    }
+}
+
+// ===========================================================================
+// Key handlers (no vol access — send commands via channel)
+// ===========================================================================
+
+fn handle_normal_key(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
-            let _ = vol.flush();
-            app.should_quit = true;
+            let _ = cmd_tx.send(IoCmd::Flush);
+            app.is_busy = true;
+            app.set_status("Flushing...");
         }
         KeyCode::Up | KeyCode::Char('k') => {
             if let Some(sel) = app.list_state.selected() {
@@ -292,10 +774,10 @@ fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Ke
             if let Some(entry) = app.selected_entry() {
                 if entry.is_dir {
                     let new_cwd = app.full_path(&entry.name);
-                    app.cwd = new_cwd;
-                    refresh_entries(app, vol);
+                    app.set_status("Loading...");
+                    let _ = cmd_tx.send(IoCmd::ListDir { path: new_cwd });
+                    app.is_busy = true;
                 } else {
-                    // On Enter for a file, show info
                     let name = entry.name.clone();
                     let size = entry.size;
                     app.set_status(&format!(
@@ -307,19 +789,21 @@ fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Ke
             }
         }
         KeyCode::Backspace | KeyCode::Left => {
-            // Go up one directory
             if app.cwd != "/" {
-                if let Some(pos) = app.cwd.rfind('/') {
+                let new_cwd = if let Some(pos) = app.cwd.rfind('/') {
                     if pos == 0 {
-                        app.cwd = "/".to_string();
+                        "/".to_string()
                     } else {
-                        app.cwd = app.cwd[..pos].to_string();
+                        app.cwd[..pos].to_string()
                     }
-                    refresh_entries(app, vol);
-                }
+                } else {
+                    "/".to_string()
+                };
+                app.set_status("Loading...");
+                let _ = cmd_tx.send(IoCmd::ListDir { path: new_cwd });
+                app.is_busy = true;
             }
         }
-        // Download
         KeyCode::Char('d') => {
             let info = app.selected_entry().map(|e| (e.is_dir, e.name.clone()));
             if let Some((is_dir, name)) = info {
@@ -327,63 +811,53 @@ fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Ke
                     app.set_error("Cannot download a directory (select a file)");
                     return;
                 }
-                let default = app.download_dir.join(&name);
-                app.input_buffer = default.to_string_lossy().to_string();
-                app.input_prompt = format!("Download '{}' to:", name);
+                let default_path = app.download_dir.join(&name);
+                app.input_prompt = format!("Save '{}' to:", name);
+                app.input_buffer = default_path.to_string_lossy().to_string();
                 app.input_mode = InputMode::DownloadPath;
             }
         }
-        // Upload
         KeyCode::Char('u') => {
-            app.input_buffer = app.download_dir.to_string_lossy().to_string();
-            app.input_prompt = format!("Upload local file to '{}':", app.cwd);
+            let default = app.download_dir.to_string_lossy().to_string();
+            app.input_prompt = format!("Upload file/directory to '{}':", app.cwd);
+            app.input_buffer = default;
             app.input_mode = InputMode::UploadPath;
         }
-        // New directory
         KeyCode::Char('n') => {
-            app.input_buffer.clear();
             app.input_prompt = "New directory name:".to_string();
+            app.input_buffer.clear();
             app.input_mode = InputMode::MkdirName;
         }
-        // Delete
         KeyCode::Char('D') => {
-            let info = app.selected_entry().map(|e| (e.is_dir, e.name.clone()));
-            if let Some((is_dir, name)) = info {
-                let kind = if is_dir { "directory" } else { "file" };
-                app.input_prompt = format!("Delete {} '{}'? (y/n)", kind, name);
+            if let Some(name) = app.selected_name() {
+                let is_dir = app.selected_entry().map(|e| e.is_dir).unwrap_or(false);
+                let msg = if is_dir {
+                    format!("Delete '{}' and all contents? (y/n):", name)
+                } else {
+                    format!("Delete '{}'? (y/n):", name)
+                };
+                app.input_prompt = msg;
                 app.input_buffer.clear();
                 app.input_mode = InputMode::ConfirmDelete;
             }
         }
-        // Rename
         KeyCode::Char('r') => {
-            let name = app.selected_entry().map(|e| e.name.clone());
-            if let Some(name) = name {
-                app.input_buffer = name.clone();
+            if let Some(name) = app.selected_name() {
                 app.input_prompt = format!("Rename '{}' to:", name);
+                app.input_buffer = name;
                 app.input_mode = InputMode::RenameName;
             }
         }
-        // Volume info
-        KeyCode::Char('i') => match vol.stats() {
-            Ok(stats) => {
-                app.set_status(&format!(
-                    "Volume: {} | Used: {} | Free: {} | Clusters: {}/{}",
-                    app.partition_name,
-                    format_size(stats.used_size),
-                    format_size(stats.free_size),
-                    stats.used_clusters,
-                    stats.total_clusters,
-                ));
-            }
-            Err(e) => app.set_error(&format!("Stats error: {}", e)),
-        },
+        KeyCode::Char('i') => {
+            let _ = cmd_tx.send(IoCmd::Stats);
+            app.is_busy = true;
+            app.set_status("Loading stats...");
+        }
         _ => {}
     }
 }
 
-/// Handle keys in text input mode.
-fn handle_input_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: KeyEvent) {
+fn handle_input_key(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
@@ -391,27 +865,93 @@ fn handle_input_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Key
         }
         KeyCode::Enter => {
             let input = app.input_buffer.clone();
-            match app.input_mode {
-                InputMode::DownloadPath => do_download(app, vol, &input),
-                InputMode::UploadPath => do_upload(app, vol, &input),
-                InputMode::MkdirName => do_mkdir(app, vol, &input),
-                InputMode::RenameName => do_rename(app, vol, &input),
-                InputMode::ConfirmDelete => {
-                    if input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
-                        do_delete(app, vol);
-                    } else {
-                        app.set_status("Delete cancelled.");
-                    }
-                }
-                InputMode::Normal => {}
-            }
             app.input_mode = InputMode::Normal;
+
+            // Dispatch based on what mode we were in (using the prompt to determine)
+            if app.input_prompt.starts_with("Save '") {
+                // Download
+                let name = app.selected_name().unwrap_or_default();
+                let fatx_path = app.full_path(&name);
+                let local_path = PathBuf::from(&input);
+                app.download_dir = local_path
+                    .parent()
+                    .unwrap_or(&PathBuf::from("."))
+                    .to_path_buf();
+                app.set_status(&format!("Downloading '{}'...", name));
+                let _ = cmd_tx.send(IoCmd::ReadFile {
+                    fatx_path,
+                    local_path,
+                });
+                app.is_busy = true;
+            } else if app.input_prompt.starts_with("Upload ") {
+                // Upload file or directory
+                let path = PathBuf::from(&input);
+                if !path.exists() {
+                    app.set_error(&format!("Not found: {}", input));
+                    return;
+                }
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file.dat".to_string());
+
+                if path.is_dir() {
+                    let fatx_dest = app.full_path(&filename);
+                    app.set_status(&format!("Uploading directory '{}'...", filename));
+                    let _ = cmd_tx.send(IoCmd::CopyDir {
+                        local_path: path.clone(),
+                        fatx_dest,
+                    });
+                } else {
+                    let fatx_path = app.full_path(&filename);
+                    app.set_status(&format!("Uploading '{}'...", filename));
+                    let _ = cmd_tx.send(IoCmd::WriteFile {
+                        local_path: path.clone(),
+                        fatx_path,
+                    });
+                }
+                app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
+                app.is_busy = true;
+            } else if app.input_prompt.starts_with("New directory") {
+                // Mkdir
+                if !input.is_empty() {
+                    let path = app.full_path(&input);
+                    app.set_status(&format!("Creating '{}'...", input));
+                    let _ = cmd_tx.send(IoCmd::Mkdir { path });
+                    app.is_busy = true;
+                }
+            } else if app.input_prompt.starts_with("Rename '") {
+                // Rename
+                let old_name = app.selected_name().unwrap_or_default();
+                if !input.is_empty() {
+                    let path = app.full_path(&old_name);
+                    let _ = cmd_tx.send(IoCmd::Rename {
+                        path,
+                        new_name: input.clone(),
+                    });
+                    app.is_busy = true;
+                }
+            } else if app.input_prompt.starts_with("Delete '") {
+                // Confirm delete
+                if input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
+                    let name = app.selected_name().unwrap_or_default();
+                    let is_dir = app.selected_entry().map(|e| e.is_dir).unwrap_or(false);
+                    let path = app.full_path(&name);
+                    app.set_status(&format!("Deleting '{}'...", name));
+                    let _ = cmd_tx.send(IoCmd::Delete {
+                        path,
+                        recursive: is_dir,
+                    });
+                    app.is_busy = true;
+                } else {
+                    app.set_status("Delete cancelled.");
+                }
+            }
         }
         KeyCode::Backspace => {
             app.input_buffer.pop();
         }
         KeyCode::Char(c) => {
-            // For confirm delete, just capture y/n
             if app.input_mode == InputMode::ConfirmDelete {
                 app.input_buffer = c.to_string();
             } else {
@@ -422,158 +962,27 @@ fn handle_input_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Key
     }
 }
 
-fn do_download(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &str) {
-    let name = match app.selected_name() {
-        Some(n) => n,
-        None => {
-            app.set_error("No file selected");
-            return;
-        }
-    };
-    let fatx_path = app.full_path(&name);
-
-    app.set_status(&format!("Downloading '{}'...", name));
-
-    match vol.read_file_by_path(&fatx_path) {
-        Ok(data) => {
-            let path = PathBuf::from(local_path);
-            // Create parent directories if needed
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            match fs::write(&path, &data) {
-                Ok(_) => {
-                    app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
-                    app.set_status(&format!(
-                        "Downloaded '{}' → {} ({})",
-                        name,
-                        path.display(),
-                        format_size(data.len() as u64)
-                    ));
-                }
-                Err(e) => app.set_error(&format!("Write error: {}", e)),
-            }
-        }
-        Err(e) => app.set_error(&format!("Read error: {}", e)),
-    }
-}
-
-fn do_upload(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &str) {
-    let path = PathBuf::from(local_path);
-    if !path.exists() {
-        app.set_error(&format!("File not found: {}", local_path));
-        return;
-    }
-
-    let filename = match path.file_name() {
-        Some(n) => n.to_string_lossy().to_string(),
-        None => {
-            app.set_error("Invalid filename");
-            return;
-        }
-    };
-
-    let fatx_path = app.full_path(&filename);
-    app.set_status(&format!("Uploading '{}'...", filename));
-
-    match fs::read(&path) {
-        Ok(data) => match vol.create_file(&fatx_path, &data) {
-            Ok(_) => {
-                let _ = vol.flush();
-                app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
-                app.set_status(&format!(
-                    "Uploaded '{}' → {} ({})",
-                    path.display(),
-                    fatx_path,
-                    format_size(data.len() as u64)
-                ));
-                refresh_entries(app, vol);
-            }
-            Err(e) => app.set_error(&format!("Upload error: {}", e)),
-        },
-        Err(e) => app.set_error(&format!("Read local error: {}", e)),
-    }
-}
-
-fn do_mkdir(app: &mut App, vol: &mut FatxVolume<std::fs::File>, name: &str) {
-    if name.is_empty() {
-        app.set_error("Name cannot be empty");
-        return;
-    }
-    let path = app.full_path(name);
-    match vol.create_directory(&path) {
-        Ok(_) => {
-            let _ = vol.flush();
-            app.set_status(&format!("Created directory '{}'", name));
-            refresh_entries(app, vol);
-        }
-        Err(e) => app.set_error(&format!("Mkdir error: {}", e)),
-    }
-}
-
-fn do_delete(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
-    let name = match app.selected_name() {
-        Some(n) => n,
-        None => {
-            app.set_error("No file selected");
-            return;
-        }
-    };
-    let path = app.full_path(&name);
-    match vol.delete(&path) {
-        Ok(_) => {
-            let _ = vol.flush();
-            app.set_status(&format!("Deleted '{}'", name));
-            refresh_entries(app, vol);
-        }
-        Err(e) => app.set_error(&format!("Delete error: {}", e)),
-    }
-}
-
-fn do_rename(app: &mut App, vol: &mut FatxVolume<std::fs::File>, new_name: &str) {
-    let old_name = match app.selected_name() {
-        Some(n) => n,
-        None => {
-            app.set_error("No file selected");
-            return;
-        }
-    };
-    if new_name.is_empty() {
-        app.set_error("Name cannot be empty");
-        return;
-    }
-    let path = app.full_path(&old_name);
-    match vol.rename(&path, new_name) {
-        Ok(_) => {
-            let _ = vol.flush();
-            app.set_status(&format!("Renamed '{}' → '{}'", old_name, new_name));
-            refresh_entries(app, vol);
-        }
-        Err(e) => app.set_error(&format!("Rename error: {}", e)),
-    }
-}
-
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // UI rendering
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // Layout: header (3), file list (fill), status bar (3)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(5),    // file list
-            Constraint::Length(3), // status / input
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(3),
         ])
         .split(area);
 
     // -- Header --
+    let busy_indicator = if app.is_busy { " ⏳" } else { "" };
     let header_text = format!(
-        " 📦 {} — {} — {}",
-        app.partition_name, app.device_display, app.cwd,
+        " {} — {} — {}{}",
+        app.partition_name, app.device_display, app.cwd, busy_indicator,
     );
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::White).bg(Color::DarkGray).bold())
@@ -627,7 +1036,6 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
     // -- Status / Input bar --
     if app.input_mode != InputMode::Normal {
-        // Input mode — show prompt + text field
         let input_text = format!(" {} {}", app.input_prompt, app.input_buffer);
         let input_bar = Paragraph::new(input_text)
             .style(
@@ -642,18 +1050,29 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     .border_style(Style::default().fg(Color::Yellow)),
             );
         frame.render_widget(input_bar, chunks[2]);
+
+        // Position cursor at end of input text (inside border: +1 x for border, +1 y for border)
+        // Text format is: " {prompt} {buffer}" — leading space + prompt + space + buffer
+        let text_len = 1 + app.input_prompt.len() + 1 + app.input_buffer.len();
+        let cursor_x = chunks[2].x + 1 + text_len as u16; // +1 for left border
+        let cursor_y = chunks[2].y + 1; // +1 for top border
+        frame.set_cursor_position((cursor_x, cursor_y));
     } else {
-        // Normal mode — show status
         let style = if app.status_is_error {
             Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::Green)
         };
+        let help = if app.is_busy {
+            " Esc: cancel "
+        } else {
+            " d:download  u:upload  n:mkdir  D:delete  r:rename  i:info  q:quit "
+        };
         let status_bar = Paragraph::new(format!(" {}", app.status))
             .style(style)
             .block(
                 Block::default()
-                    .title(" d:download  u:upload  n:mkdir  D:delete  r:rename  i:info  q:quit ")
+                    .title(help)
                     .title_style(Style::default().fg(Color::DarkGray))
                     .borders(Borders::TOP)
                     .border_style(Style::default().fg(Color::Gray)),

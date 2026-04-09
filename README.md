@@ -148,6 +148,13 @@ sudo fatx rm /dev/rdisk4 --partition "360 Data" /hello.txt
 sudo fatx rmr /dev/rdisk4 --partition "360 Data" /Content
 ```
 
+### Copy a Directory
+
+```bash
+# Recursively copy a local directory onto the FATX volume
+sudo fatx copy /dev/rdisk4 --partition "360 Data" --from /path/to/local/folder --to /DestFolder
+```
+
 ### Rename
 
 ```bash

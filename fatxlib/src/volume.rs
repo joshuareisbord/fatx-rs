@@ -1474,10 +1474,12 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
     /// Recursively delete a file or directory and all its contents.
     /// Tolerates corrupt chains from interrupted writes.
     pub fn delete_recursive(&mut self, path: &str) -> Result<()> {
+        let (parent_path, target_name) = split_path(path);
+        let parent = self.resolve_path(parent_path)?;
         let target = self.resolve_path(path)?;
 
         if target.is_directory() {
-            // Tolerate corrupt directory reads
+            // Tolerate corrupt directory reads — delete as many children as possible
             match self.read_directory(target.first_cluster) {
                 Ok(contents) => {
                     for entry in &contents {
@@ -1500,8 +1502,17 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             }
         }
 
-        // delete() calls free_chain (now tolerant) then marks dirent deleted
-        self.delete(path)
+        // Free the cluster chain (tolerant — continues even if chain is corrupt)
+        if let Err(e) = self.free_chain(target.first_cluster) {
+            warn!("delete_recursive '{}': failed to free chain: {}", path, e);
+        }
+
+        // Force-delete the directory entry even if directory wasn't fully emptied
+        // (we've done our best to clean up children above)
+        self.mark_dirent_deleted(parent.first_cluster, target_name)?;
+
+        info!("Deleted '{}' (recursive)", path);
+        Ok(())
     }
 
     /// Recursively copy a local directory tree into the FATX volume.
@@ -1512,6 +1523,17 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         local_path: &std::path::Path,
         dest_path: &str,
         progress: Option<&dyn Fn(&str, u64, u64)>,
+    ) -> Result<(usize, usize, u64)> {
+        self.copy_from_host_inner(local_path, dest_path, progress, 0)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn copy_from_host_inner(
+        &mut self,
+        local_path: &std::path::Path,
+        dest_path: &str,
+        progress: Option<&dyn Fn(&str, u64, u64)>,
+        base_bytes: u64,
     ) -> Result<(usize, usize, u64)> {
         use std::fs;
 
@@ -1547,7 +1569,12 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             };
 
             if local_child.is_dir() {
-                let (fc, dc, tb) = self.copy_from_host(&local_child, &fatx_child, progress)?;
+                let (fc, dc, tb) = self.copy_from_host_inner(
+                    &local_child,
+                    &fatx_child,
+                    progress,
+                    base_bytes + total_bytes,
+                )?;
                 file_count += fc;
                 dir_count += dc;
                 total_bytes += tb;
@@ -1562,7 +1589,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 let file_size = data.len() as u64;
 
                 if let Some(cb) = &progress {
-                    cb(&fatx_child, file_size, total_bytes);
+                    cb(&fatx_child, file_size, base_bytes + total_bytes);
                 }
 
                 self.create_file(&fatx_child, &data)?;
