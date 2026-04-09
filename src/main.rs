@@ -213,10 +213,13 @@ enum Commands {
         #[arg(long)]
         partition: Option<String>,
     },
-    /// Delete a file or empty directory
+    /// Delete a file or directory (-r for recursive)
     Rm {
         device: PathBuf,
         path: String,
+        /// Recursive — delete directory and all its contents
+        #[arg(short, long)]
+        recursive: bool,
         #[arg(long, value_parser = parse_hex_or_dec, default_value = "0")]
         offset: u64,
         #[arg(long, value_parser = parse_hex_or_dec, default_value = "0")]
@@ -262,7 +265,8 @@ enum Commands {
         #[arg(long)]
         partition: Option<String>,
     },
-    /// Recursively delete a file or directory and all its contents
+    /// Recursively delete (alias for rm -r, kept for backwards compatibility)
+    #[command(hide = true)]
     Rmr {
         device: PathBuf,
         path: String,
@@ -515,9 +519,9 @@ fn interactive_mode() {
         println!("  1) ls        — List files here");
         println!("  2) cd        — Change directory");
         println!("  3) read      — Extract a file to local disk");
-        println!("  4) write     — Copy a local file onto the FATX volume");
+        println!("  4) write     — Upload a local file or directory to the FATX volume");
         println!("  5) mkdir     — Create a directory");
-        println!("  6) rm        — Delete a file or empty directory");
+        println!("  6) rm        — Delete a file or directory");
         println!("  7) rename    — Rename a file or directory");
         println!("  8) info      — Volume statistics");
         println!("  9) hexdump   — Raw hex dump");
@@ -639,84 +643,87 @@ fn interactive_ls(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
 }
 
 fn interactive_cd(vol: &mut FatxVolume<std::fs::File>, cwd: &str) -> String {
-    // Show current directory contents to help navigate
-    let entry = match vol.resolve_path(cwd) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return cwd.to_string();
-        }
-    };
+    let mut current = cwd.to_string();
 
-    let entries = vol.read_directory(entry.first_cluster).unwrap_or_default();
-    let dirs: Vec<_> = entries.iter().filter(|e| e.is_directory()).collect();
-
-    if dirs.is_empty() && cwd != "/" {
-        println!("  No subdirectories here.");
-        println!("  Enter '..' to go up, or '/' for root.");
-    } else {
-        println!("  Subdirectories:");
-        if cwd != "/" {
-            println!("    ..) Go up (parent directory)");
-        }
-        for (i, d) in dirs.iter().enumerate() {
-            println!("    {}) {}/", i + 1, d.filename());
-        }
-    }
-
-    print!("\n  Enter directory name, number, '..' or '/': ");
-    io::stdout().flush().unwrap();
-    let input = read_line();
-    let input = input.trim();
-
-    if input == "/" {
-        return "/".to_string();
-    }
-    if input == ".." {
-        // Go up one level
-        if cwd == "/" {
-            return "/".to_string();
-        }
-        let parent = match cwd.rfind('/') {
-            Some(0) => "/",
-            Some(pos) => &cwd[..pos],
-            None => "/",
+    loop {
+        let entry = match vol.resolve_path(&current) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return current;
+            }
         };
-        return parent.to_string();
-    }
 
-    // Check if it's a number selection
-    let target = if let Ok(n) = input.parse::<usize>() {
-        if n >= 1 && n <= dirs.len() {
-            dirs[n - 1].filename()
+        let entries = vol.read_directory(entry.first_cluster).unwrap_or_default();
+        let dirs: Vec<_> = entries.iter().filter(|e| e.is_directory()).collect();
+
+        println!("\n  Current: {}", current);
+        if dirs.is_empty() && current != "/" {
+            println!("  No subdirectories here.");
         } else {
-            println!("  Invalid selection.");
-            return cwd.to_string();
+            println!("  Subdirectories:");
+            if current != "/" {
+                println!("    ..) Go up (parent directory)");
+            }
+            for (i, d) in dirs.iter().enumerate() {
+                println!("    {}) {}/", i + 1, d.filename());
+            }
         }
-    } else {
-        input.to_string()
-    };
 
-    // Build new path
-    let new_path = if cwd == "/" {
-        format!("/{}", target)
-    } else {
-        format!("{}/{}", cwd, target)
-    };
+        print!("\n  Navigate (number, '..', '/') or Enter to stay here: ");
+        io::stdout().flush().unwrap();
+        let input = read_line();
+        let input = input.trim();
 
-    // Verify it exists and is a directory
-    match vol.resolve_path(&new_path) {
-        Ok(e) if e.is_directory() => {
-            println!("  Changed to: {}", new_path);
-            new_path
+        // Empty input = done navigating, stay at current
+        if input.is_empty() {
+            return current;
         }
-        Ok(_) => {
-            println!("  '{}' is not a directory.", target);
-            cwd.to_string()
+
+        if input == "/" {
+            current = "/".to_string();
+            continue;
         }
-        Err(e) => {
-            println!("  Error: {}", e);
-            cwd.to_string()
+        if input == ".." {
+            if current == "/" {
+                continue;
+            }
+            let parent = match current.rfind('/') {
+                Some(0) => "/",
+                Some(pos) => &current[..pos],
+                None => "/",
+            };
+            current = parent.to_string();
+            continue;
+        }
+
+        let target = if let Ok(n) = input.parse::<usize>() {
+            if n >= 1 && n <= dirs.len() {
+                dirs[n - 1].filename()
+            } else {
+                println!("  Invalid selection.");
+                continue;
+            }
+        } else {
+            input.to_string()
+        };
+
+        let new_path = if current == "/" {
+            format!("/{}", target)
+        } else {
+            format!("{}/{}", current, target)
+        };
+
+        match vol.resolve_path(&new_path) {
+            Ok(e) if e.is_directory() => {
+                current = new_path;
+            }
+            Ok(_) => {
+                println!("  '{}' is not a directory.", target);
+            }
+            Err(e) => {
+                println!("  Error: {}", e);
+            }
         }
     }
 }
@@ -795,7 +802,7 @@ fn interactive_read(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
 }
 
 fn interactive_write(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
-    print!("  Local file to upload: ");
+    print!("  Local file or directory to upload: ");
     io::stdout().flush().unwrap();
     let local_path = read_line();
     let local_path = local_path.trim();
@@ -805,48 +812,92 @@ fn interactive_write(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
         return;
     }
 
-    let data = match fs::read(local_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("  Error reading '{}': {}", local_path, e);
-            return;
-        }
-    };
+    let path = PathBuf::from(local_path);
+    if !path.exists() {
+        eprintln!("  Not found: {}", local_path);
+        return;
+    }
 
-    let local_filename = PathBuf::from(local_path);
-    let default_name = local_filename
+    let default_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.dat".to_string());
 
-    print!("  Name on FATX volume [default: {}]: ", default_name);
-    io::stdout().flush().unwrap();
-    let name_input = read_line();
-    let fatx_name = if name_input.trim().is_empty() {
-        default_name
-    } else {
-        name_input.trim().to_string()
-    };
+    if path.is_dir() {
+        // Directory upload — use copy_from_host
+        print!("  Folder name on FATX volume [default: {}]: ", default_name);
+        io::stdout().flush().unwrap();
+        let name_input = read_line();
+        let fatx_name = if name_input.trim().is_empty() {
+            default_name
+        } else {
+            name_input.trim().to_string()
+        };
 
-    let fatx_path = if cwd == "/" {
-        format!("/{}", fatx_name)
-    } else {
-        format!("{}/{}", cwd, fatx_name)
-    };
+        let fatx_dest = if cwd == "/" {
+            format!("/{}", fatx_name)
+        } else {
+            format!("{}/{}", cwd, fatx_name)
+        };
 
-    println!(
-        "  Writing {} ({}) to '{}'...",
-        local_path,
-        format_size(data.len() as u64),
-        fatx_path
-    );
+        println!("  Copying directory '{}' to '{}'...", local_path, fatx_dest);
 
-    match vol.create_file(&fatx_path, &data) {
-        Ok(()) => {
-            let _ = vol.flush();
-            println!("  Done!");
+        let local = std::path::Path::new(local_path);
+        let progress_fn = |msg: &str, _current: u64, _total: u64| {
+            println!("    {}", msg);
+        };
+
+        match vol.copy_from_host(local, &fatx_dest, Some(&progress_fn)) {
+            Ok((dirs, files, bytes)) => {
+                let _ = vol.flush();
+                println!(
+                    "  Done! {} dirs, {} files, {} copied",
+                    dirs,
+                    files,
+                    format_size(bytes)
+                );
+            }
+            Err(e) => eprintln!("  Error: {}", e),
         }
-        Err(e) => eprintln!("  Error: {}", e),
+    } else {
+        // Single file upload
+        let data = match fs::read(local_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  Error reading '{}': {}", local_path, e);
+                return;
+            }
+        };
+
+        print!("  Name on FATX volume [default: {}]: ", default_name);
+        io::stdout().flush().unwrap();
+        let name_input = read_line();
+        let fatx_name = if name_input.trim().is_empty() {
+            default_name
+        } else {
+            name_input.trim().to_string()
+        };
+
+        let fatx_path = if cwd == "/" {
+            format!("/{}", fatx_name)
+        } else {
+            format!("{}/{}", cwd, fatx_name)
+        };
+
+        println!(
+            "  Writing {} ({}) to '{}'...",
+            local_path,
+            format_size(data.len() as u64),
+            fatx_path
+        );
+
+        match vol.create_file(&fatx_path, &data) {
+            Ok(()) => {
+                let _ = vol.flush();
+                println!("  Done!");
+            }
+            Err(e) => eprintln!("  Error: {}", e),
+        }
     }
 }
 
@@ -923,7 +974,20 @@ fn interactive_rm(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
         format!("{}/{}", cwd, name)
     };
 
-    print!("  Really delete '{}'? (y/n): ", path);
+    // Check if it's a directory to offer recursive delete
+    let is_dir = vol
+        .resolve_path(&path)
+        .map(|e| e.is_directory())
+        .unwrap_or(false);
+
+    if is_dir {
+        print!(
+            "  '{}' is a directory. Delete it and all its contents? (y/n): ",
+            path
+        );
+    } else {
+        print!("  Really delete '{}'? (y/n): ", path);
+    }
     io::stdout().flush().unwrap();
     let confirm = read_line();
     if !confirm.starts_with('y') && !confirm.starts_with('Y') {
@@ -931,7 +995,13 @@ fn interactive_rm(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
         return;
     }
 
-    match vol.delete(&path) {
+    let result = if is_dir {
+        vol.delete_recursive(&path)
+    } else {
+        vol.delete(&path)
+    };
+
+    match result {
         Ok(()) => {
             let _ = vol.flush();
             println!("  Deleted '{}'", path);
@@ -1372,22 +1442,28 @@ fn print_entry(entry: &fatxlib::types::DirectoryEntry, long: bool) {
 fn main() {
     let cli = Cli::parse();
 
-    let default_level = if cli.verbose { "debug" } else { "warn" };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "[{} {}:{}] {}",
-                record.level(),
-                record.file().unwrap_or("?"),
-                record.line().unwrap_or(0),
-                record.args()
-            )
-        })
-        .init();
+    // Mount and mkimage init their own loggers with their preferred format.
+    // Only init the CLI logger for other subcommands.
+    let is_mount = matches!(cli.command, Some(Commands::Mount(_)));
+    let is_mkimage = matches!(cli.command, Some(Commands::Mkimage(_)));
+    if !is_mount && !is_mkimage {
+        let default_level = if cli.verbose { "debug" } else { "warn" };
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
+            .format(|buf, record| {
+                writeln!(
+                    buf,
+                    "[{} {}:{}] {}",
+                    record.level(),
+                    record.file().unwrap_or("?"),
+                    record.line().unwrap_or(0),
+                    record.args()
+                )
+            })
+            .init();
 
-    if cli.verbose {
-        log::debug!("Verbose mode enabled");
+        if cli.verbose {
+            log::debug!("Verbose mode enabled");
+        }
     }
 
     let json = cli.json;
@@ -1690,12 +1766,18 @@ fn main() {
         Some(Commands::Rm {
             device,
             path,
+            recursive,
             offset,
             size,
             partition,
         }) => {
             let mut vol = open_volume(&device, &partition, offset, size);
-            vol.delete(&path).unwrap_or_else(|e| {
+            let result = if recursive {
+                vol.delete_recursive(&path)
+            } else {
+                vol.delete(&path)
+            };
+            result.unwrap_or_else(|e| {
                 if json {
                     println!("{}", serde_json::json!({"error": format!("{}", e)}));
                     process::exit(0);
@@ -1704,7 +1786,11 @@ fn main() {
                 process::exit(1);
             });
             vol.flush().unwrap();
-            let msg = format!("Deleted '{}'", path);
+            let msg = if recursive {
+                format!("Recursively deleted '{}'", path)
+            } else {
+                format!("Deleted '{}'", path)
+            };
             if json {
                 println!(
                     "{}",

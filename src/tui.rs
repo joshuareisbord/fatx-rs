@@ -5,7 +5,7 @@
 //!   Enter      Open directory / select file
 //!   Backspace  Go up one directory
 //!   d          Download selected file to local disk
-//!   u          Upload a local file to current directory
+//!   u          Upload a local file or directory to current directory
 //!   n          Create new directory
 //!   D          Delete selected file/directory
 //!   r          Rename selected file/directory
@@ -233,7 +233,7 @@ pub fn run_browser(
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => handle_normal_key(&mut app, vol, key),
-                _ => handle_input_key(&mut app, vol, key),
+                _ => handle_input_key(&mut app, vol, &mut terminal, key),
             }
         }
     }
@@ -383,7 +383,12 @@ fn handle_normal_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Ke
 }
 
 /// Handle keys in text input mode.
-fn handle_input_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: KeyEvent) {
+fn handle_input_key(
+    app: &mut App,
+    vol: &mut FatxVolume<std::fs::File>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    key: KeyEvent,
+) {
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
@@ -393,7 +398,7 @@ fn handle_input_key(app: &mut App, vol: &mut FatxVolume<std::fs::File>, key: Key
             let input = app.input_buffer.clone();
             match app.input_mode {
                 InputMode::DownloadPath => do_download(app, vol, &input),
-                InputMode::UploadPath => do_upload(app, vol, &input),
+                InputMode::UploadPath => do_upload(app, vol, terminal, &input),
                 InputMode::MkdirName => do_mkdir(app, vol, &input),
                 InputMode::RenameName => do_rename(app, vol, &input),
                 InputMode::ConfirmDelete => {
@@ -458,10 +463,18 @@ fn do_download(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &
     }
 }
 
-fn do_upload(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &str) {
+fn do_upload(
+    app: &mut App,
+    vol: &mut FatxVolume<std::fs::File>,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    local_path: &str,
+) {
+    // Switch back to Normal mode so the status bar shows progress (not the input prompt)
+    app.input_mode = InputMode::Normal;
+
     let path = PathBuf::from(local_path);
     if !path.exists() {
-        app.set_error(&format!("File not found: {}", local_path));
+        app.set_error(&format!("Not found: {}", local_path));
         return;
     }
 
@@ -473,25 +486,146 @@ fn do_upload(app: &mut App, vol: &mut FatxVolume<std::fs::File>, local_path: &st
         }
     };
 
-    let fatx_path = app.full_path(&filename);
-    app.set_status(&format!("Uploading '{}'...", filename));
+    if path.is_dir() {
+        // Directory upload — walk tree manually so we can update TUI between files
+        let fatx_dest = app.full_path(&filename);
+        app.set_status(&format!("Scanning '{}'...", filename));
+        let _ = terminal.draw(|frame| ui(frame, app));
 
-    match fs::read(&path) {
-        Ok(data) => match vol.create_file(&fatx_path, &data) {
-            Ok(_) => {
-                let _ = vol.flush();
-                app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
-                app.set_status(&format!(
-                    "Uploaded '{}' → {} ({})",
-                    path.display(),
-                    fatx_path,
-                    format_size(data.len() as u64)
-                ));
-                refresh_entries(app, vol);
+        // Collect all files first so we know the total
+        let mut file_list: Vec<(PathBuf, String)> = Vec::new();
+        collect_files(&path, &fatx_dest, &mut file_list);
+        let total_files = file_list.len();
+        let total_size: u64 = file_list
+            .iter()
+            .filter_map(|(p, _)| fs::metadata(p).ok().map(|m| m.len()))
+            .sum();
+
+        // Create directory structure
+        let mut dirs_created = 0usize;
+        create_dirs_recursive(vol, &path, &fatx_dest, &mut dirs_created);
+
+        // Copy files one at a time with progress
+        let mut bytes_done = 0u64;
+        let mut files_done = 0usize;
+        let mut last_error: Option<String> = None;
+
+        for (local_file, fatx_path) in &file_list {
+            let file_size = fs::metadata(local_file).map(|m| m.len()).unwrap_or(0);
+            files_done += 1;
+
+            app.set_status(&format!(
+                "Uploading [{}/{}] {} ({}/{})",
+                files_done,
+                total_files,
+                fatx_path,
+                format_size(bytes_done),
+                format_size(total_size),
+            ));
+            let _ = terminal.draw(|frame| ui(frame, app));
+
+            match fs::read(local_file) {
+                Ok(data) => match vol.create_file(fatx_path, &data) {
+                    Ok(_) => {
+                        bytes_done += file_size;
+                    }
+                    Err(e) => {
+                        last_error = Some(format!("{}: {}", fatx_path, e));
+                        break;
+                    }
+                },
+                Err(e) => {
+                    last_error = Some(format!("Read {}: {}", local_file.display(), e));
+                    break;
+                }
             }
-            Err(e) => app.set_error(&format!("Upload error: {}", e)),
-        },
-        Err(e) => app.set_error(&format!("Read local error: {}", e)),
+        }
+
+        let _ = vol.flush();
+        app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
+
+        if let Some(err) = last_error {
+            app.set_error(&format!(
+                "Upload failed at {}/{} files: {}",
+                files_done, total_files, err
+            ));
+        } else {
+            app.set_status(&format!(
+                "Uploaded '{}' — {} files, {} dirs, {}",
+                filename,
+                files_done,
+                dirs_created,
+                format_size(bytes_done)
+            ));
+        }
+        refresh_entries(app, vol);
+    } else {
+        // Single file upload
+        let fatx_path = app.full_path(&filename);
+        app.set_status(&format!("Uploading '{}'...", filename));
+        let _ = terminal.draw(|frame| ui(frame, app));
+
+        match fs::read(&path) {
+            Ok(data) => match vol.create_file(&fatx_path, &data) {
+                Ok(_) => {
+                    let _ = vol.flush();
+                    app.download_dir = path.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
+                    app.set_status(&format!(
+                        "Uploaded '{}' → {} ({})",
+                        path.display(),
+                        fatx_path,
+                        format_size(data.len() as u64)
+                    ));
+                    refresh_entries(app, vol);
+                }
+                Err(e) => app.set_error(&format!("Upload error: {}", e)),
+            },
+            Err(e) => app.set_error(&format!("Read local error: {}", e)),
+        }
+    }
+}
+
+/// Recursively collect all files from a local directory into a flat list.
+fn collect_files(local_dir: &PathBuf, fatx_dir: &str, out: &mut Vec<(PathBuf, String)>) {
+    let entries = match fs::read_dir(local_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let local_child = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let fatx_child = format!("{}/{}", fatx_dir, name);
+
+        if local_child.is_dir() {
+            collect_files(&local_child, &fatx_child, out);
+        } else if local_child.is_file() {
+            out.push((local_child, fatx_child));
+        }
+    }
+}
+
+/// Recursively create directory structure on the FATX volume.
+fn create_dirs_recursive(
+    vol: &mut FatxVolume<std::fs::File>,
+    local_dir: &PathBuf,
+    fatx_dir: &str,
+    count: &mut usize,
+) {
+    match vol.create_directory(fatx_dir) {
+        Ok(_) => *count += 1,
+        Err(fatxlib::error::FatxError::FileExists(_)) => {}
+        Err(_) => return,
+    }
+    let entries = match fs::read_dir(local_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let fatx_child = format!("{}/{}", fatx_dir, name);
+            create_dirs_recursive(vol, &entry.path(), &fatx_child, count);
+        }
     }
 }
 
@@ -520,7 +654,18 @@ fn do_delete(app: &mut App, vol: &mut FatxVolume<std::fs::File>) {
         }
     };
     let path = app.full_path(&name);
-    match vol.delete(&path) {
+    // Use recursive delete for directories, regular delete for files
+    let is_dir = app
+        .entries
+        .get(app.list_state.selected().unwrap_or(0))
+        .map(|e| e.is_dir)
+        .unwrap_or(false);
+    let result = if is_dir {
+        vol.delete_recursive(&path)
+    } else {
+        vol.delete(&path)
+    };
+    match result {
         Ok(_) => {
             let _ = vol.flush();
             app.set_status(&format!("Deleted '{}'", name));
