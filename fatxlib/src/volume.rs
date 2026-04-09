@@ -221,7 +221,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let mut free_cluster_count = 0u32;
         let mut bad_cluster_count = 0u32;
         // Bitmap: 1 bit per cluster, set = free. Need words for clusters 0..total_clusters+FIRST_CLUSTER.
-        let bitmap_words = ((FIRST_CLUSTER + total_clusters) as usize + 63) / 64;
+        let bitmap_words = ((FIRST_CLUSTER + total_clusters) as usize).div_ceil(64);
         let mut free_bitmap = vec![0u64; bitmap_words];
 
         for cluster in FIRST_CLUSTER..(FIRST_CLUSTER + total_clusters) {
@@ -454,7 +454,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let aligned_len = self.align_up(total_needed);
         let align = self.alignment as usize;
 
-        if pre_skip == 0 && buf.len() % align == 0 {
+        if pre_skip == 0 && buf.len().is_multiple_of(align) {
             // Already aligned — write directly
             self.inner.seek(SeekFrom::Start(abs))?;
             self.inner.write_all(buf)?;
@@ -645,7 +645,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let from = from as usize;
         let to = to as usize;
         let start_word = from / 64;
-        let end_word = (to + 63) / 64;
+        let end_word = to.div_ceil(64);
 
         for word_idx in start_word..end_word.min(self.free_bitmap.len()) {
             let mut word = self.free_bitmap[word_idx];

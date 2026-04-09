@@ -163,6 +163,7 @@ type DirtyFileMap = HashMap<u32, (String, Vec<u8>)>;
 /// - dir_cache/file_cache: quick_cache — internally sharded, no external lock needed
 /// - inode_parents: RwLock — read-heavy, small map
 /// - dirty_files: Mutex — write-only, short critical sections
+///
 /// Lock ordering: (1) vol, (2) inode_parents, (3) caches (lockless), (4) dirty_files
 struct FatxNfs {
     vol: Arc<RwLock<FatxVolume<File>>>,
