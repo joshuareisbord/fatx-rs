@@ -14,10 +14,6 @@ This includes:
 
 **After use:** Delete temporary files from `.tmp/` when they are no longer needed. Don't let the directory accumulate stale artifacts.
 
-## PRD & Spec Files
-
-`docs/prd/` and `docs/specs/` ARE intended to be committed. These are not temporary.
-
 ## Build Artifacts
 
 Build artifacts go in `target/` (managed by Cargo, already gitignored). Never manually place files there.
