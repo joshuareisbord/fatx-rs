@@ -413,7 +413,7 @@ fn io_worker(
                     // For large files (>1MB): chunked write with per-cluster progress
                     if data.len() > 1_048_576 {
                         // Create the file first (allocates clusters)
-                        if let Err(e) = vol.create_file(fatx_path, &[]) {
+                        if vol.create_file(fatx_path, &[]).is_err() {
                             // If empty create fails, try directly with data
                             if let Err(e2) = vol.create_file(fatx_path, &data) {
                                 let _ = resp_tx.send(IoResp::Error {
@@ -428,7 +428,7 @@ fn io_worker(
                         match vol.prepare_write_in_place(fatx_path, data.len()) {
                             Ok(chain) => {
                                 let mut offset = 0usize;
-                                let mut file_bytes_written = 0u64;
+                                let mut file_bytes_written: u64;
                                 for &cluster in &chain {
                                     if cancel_flag.load(Ordering::Relaxed) {
                                         cancelled = true;
