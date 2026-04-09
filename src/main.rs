@@ -1480,9 +1480,9 @@ fn main() {
             let part_name = partition
                 .clone()
                 .unwrap_or_else(|| "FATX Volume".to_string());
-            let mut vol = open_volume(&device, &partition, offset, size);
+            let vol = open_volume(&device, &partition, offset, size);
             let dev_display = device.display().to_string();
-            if let Err(e) = tui::run_browser(&mut vol, &part_name, &dev_display) {
+            if let Err(e) = tui::run_browser(vol, &part_name, &dev_display) {
                 eprintln!("TUI error: {}", e);
                 process::exit(1);
             }
