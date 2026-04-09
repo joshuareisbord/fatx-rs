@@ -64,9 +64,7 @@ cargo build --release 2>&1
 
 echo ""
 echo -e "  ${GREEN}Built successfully:${NC}"
-echo "    target/release/fatx         (main CLI + interactive mode)"
-echo "    target/release/fatx-mount   (NFS mount server for Finder)"
-echo "    target/release/fatx-mkimage (test image generator)"
+echo "    target/release/fatx         (single binary — CLI, mount, mkimage)"
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -75,7 +73,7 @@ echo ""
 echo -e "${BOLD}[4/5] Install to /usr/local/bin? (makes 'fatx' available system-wide)${NC}"
 read -p "  Install? (y/n) [n]: " INSTALL_CHOICE
 
-BINARIES="fatx fatx-mount fatx-mkimage"
+BINARIES="fatx"
 
 if [[ "$INSTALL_CHOICE" == "y" || "$INSTALL_CHOICE" == "Y" ]]; then
     for bin in $BINARIES; do

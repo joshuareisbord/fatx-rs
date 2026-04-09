@@ -17,7 +17,7 @@ set -e
 
 REPO="joshuareisbord/fatx-rs"
 INSTALL_DIR="${FATX_INSTALL_DIR:-/usr/local/bin}"
-BINARIES="fatx fatx-mount fatx-mkimage"
+BINARIES="fatx"
 
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -139,6 +139,19 @@ if [[ ! -d "$INSTALL_DIR" ]]; then
         sudo mkdir -p "$INSTALL_DIR"
     fi
 fi
+
+# Remove old multi-binary install (pre-v1.0.0 used 3 separate binaries)
+OLD_BINARIES="fatx-mount fatx-mkimage"
+for old_bin in $OLD_BINARIES; do
+    if [[ -f "$INSTALL_DIR/$old_bin" ]]; then
+        if [[ -w "$INSTALL_DIR" ]]; then
+            rm -f "$INSTALL_DIR/$old_bin"
+        else
+            sudo rm -f "$INSTALL_DIR/$old_bin"
+        fi
+        ok "Removed old binary $INSTALL_DIR/$old_bin"
+    fi
+done
 
 for bin in $BINARIES; do
     if [[ -w "$INSTALL_DIR" ]]; then

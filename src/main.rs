@@ -6,6 +6,8 @@
 //!   fatx scan /dev/rdisk4
 //!   fatx ls /dev/rdisk4 --partition "Data (E)" /
 
+mod mkimage;
+mod mount;
 mod tui;
 
 use std::fs::{self, File, OpenOptions};
@@ -280,25 +282,10 @@ enum Commands {
         count: usize,
     },
     /// Mount a FATX volume via NFS (shows in Finder)
-    #[command(
-        about = "Mount a FATX volume via NFS server (shows in Finder). Use --help after -- for full options.",
-        trailing_var_arg = true,
-        disable_help_flag = true
-    )]
-    Mount {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Create a blank FATX disk image for testing
-    #[command(
-        about = "Create a blank FATX/XTAF disk image for testing. Use --help after -- for full options.",
-        trailing_var_arg = true,
-        disable_help_flag = true
-    )]
-    Mkimage {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
+    /// Mount a FATX volume via NFS server (shows in Finder)
+    Mount(mount::MountArgs),
+    /// Create a blank FATX/XTAF disk image for testing
+    Mkimage(mkimage::MkimageArgs),
 }
 
 // ===========================================================================
@@ -2003,48 +1990,12 @@ fn main() {
             }
         }
 
-        Some(Commands::Mount { args }) => {
-            // Delegate to fatx-mount binary (same target directory)
-            let exe = std::env::current_exe().unwrap_or_default();
-            let exe_dir = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let mount_bin = exe_dir.join("fatx-mount");
-
-            if !mount_bin.exists() {
-                eprintln!("Error: fatx-mount not found at {}", mount_bin.display());
-                eprintln!("Build it with: cargo build --release -p fatx-mount");
-                process::exit(1);
-            }
-
-            let status = Command::new(&mount_bin)
-                .args(&args)
-                .status()
-                .unwrap_or_else(|e| {
-                    eprintln!("Error running fatx-mount: {}", e);
-                    process::exit(1);
-                });
-            process::exit(status.code().unwrap_or(1));
+        Some(Commands::Mount(args)) => {
+            mount::run(args);
         }
 
-        Some(Commands::Mkimage { args }) => {
-            // Delegate to fatx-mkimage binary (same target directory)
-            let exe = std::env::current_exe().unwrap_or_default();
-            let exe_dir = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let mkimage_bin = exe_dir.join("fatx-mkimage");
-
-            if !mkimage_bin.exists() {
-                eprintln!("Error: fatx-mkimage not found at {}", mkimage_bin.display());
-                eprintln!("Build it with: cargo build --release -p fatx-mkimage");
-                process::exit(1);
-            }
-
-            let status = Command::new(&mkimage_bin)
-                .args(&args)
-                .status()
-                .unwrap_or_else(|e| {
-                    eprintln!("Error running fatx-mkimage: {}", e);
-                    process::exit(1);
-                });
-            process::exit(status.code().unwrap_or(1));
+        Some(Commands::Mkimage(args)) => {
+            mkimage::run(args);
         }
     }
 }

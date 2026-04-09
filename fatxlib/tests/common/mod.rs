@@ -1,6 +1,6 @@
 //! Shared test fixture helpers for fatxlib integration tests.
 //!
-//! Generates temporary FATX/XTAF images by invoking the `fatx-mkimage` binary.
+//! Generates temporary FATX/XTAF images by invoking `fatx mkimage`.
 //! Each helper returns a `TempDir` (auto-deletes on drop) and an opened `FatxVolume<File>`.
 
 use std::fs::{File, OpenOptions};
@@ -10,9 +10,8 @@ use std::process::Command;
 use fatxlib::volume::FatxVolume;
 use tempfile::TempDir;
 
-/// Find the fatx-mkimage binary. Uses the workspace target directory.
-fn mkimage_bin() -> PathBuf {
-    // Walk up from the manifest dir to find the workspace root
+/// Find the fatx binary. Uses the workspace target directory.
+fn fatx_bin() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // fatxlib/Cargo.toml -> go up one level to workspace root
     dir.pop();
@@ -23,17 +22,16 @@ fn mkimage_bin() -> PathBuf {
         "release"
     };
 
-    let bin = dir.join("target").join(profile).join("fatx-mkimage");
+    let bin = dir.join("target").join(profile).join("fatx");
     if !bin.exists() {
-        // Build it
         let status = Command::new("cargo")
-            .args(["build", "-p", "fatx-mkimage"])
+            .args(["build", "-p", "fatx-cli"])
             .current_dir(&dir)
             .status()
-            .expect("failed to run cargo build for fatx-mkimage");
-        assert!(status.success(), "failed to build fatx-mkimage");
+            .expect("failed to run cargo build for fatx-cli");
+        assert!(status.success(), "failed to build fatx-cli");
     }
-    assert!(bin.exists(), "fatx-mkimage binary not found at {:?}", bin);
+    assert!(bin.exists(), "fatx binary not found at {:?}", bin);
     bin
 }
 
@@ -51,6 +49,7 @@ pub fn create_image(size_mb: u32, format: &str, populate: bool) -> (TempDir, Fat
     let img_path = tmp_dir.path().join("test.img");
 
     let mut args = vec![
+        "mkimage".to_string(),
         img_path.to_str().unwrap().to_string(),
         "--size".to_string(),
         format!("{}M", size_mb),
@@ -62,14 +61,14 @@ pub fn create_image(size_mb: u32, format: &str, populate: bool) -> (TempDir, Fat
         args.push("--populate".to_string());
     }
 
-    let output = Command::new(mkimage_bin())
+    let output = Command::new(fatx_bin())
         .args(&args)
         .output()
-        .expect("failed to run fatx-mkimage");
+        .expect("failed to run fatx mkimage");
 
     assert!(
         output.status.success(),
-        "fatx-mkimage failed: {}",
+        "fatx mkimage failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 

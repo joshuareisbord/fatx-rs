@@ -7,37 +7,18 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Path to the fatx-mkimage binary
-fn mkimage_bin() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let bin = dir.join("target").join(profile).join("fatx-mkimage");
-    if !bin.exists() {
-        let status = Command::new("cargo")
-            .args(["build", "-p", "fatx-mkimage"])
-            .current_dir(&dir)
-            .status()
-            .expect("build fatx-mkimage");
-        assert!(status.success());
-    }
-    bin
-}
-
 /// Create fatx command
 fn fatx_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_fatx"))
 }
 
-/// Create a temp image. Returns (TempDir, image_path).
+/// Create a temp image via `fatx mkimage`. Returns (TempDir, image_path).
 fn create_test_image(size_mb: u32, populate: bool) -> (TempDir, PathBuf) {
     let tmp = TempDir::new().expect("create temp dir");
     let img = tmp.path().join("test.img");
 
     let mut args = vec![
+        "mkimage".to_string(),
         img.to_str().unwrap().to_string(),
         "--size".to_string(),
         format!("{}M", size_mb),
@@ -47,13 +28,10 @@ fn create_test_image(size_mb: u32, populate: bool) -> (TempDir, PathBuf) {
         args.push("--populate".to_string());
     }
 
-    let output = Command::new(mkimage_bin())
-        .args(&args)
-        .output()
-        .expect("run fatx-mkimage");
+    let output = fatx_bin().args(&args).output().expect("run fatx mkimage");
     assert!(
         output.status.success(),
-        "mkimage failed: {}",
+        "fatx mkimage failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
