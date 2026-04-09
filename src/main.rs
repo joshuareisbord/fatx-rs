@@ -812,9 +812,11 @@ fn interactive_write(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
         return;
     }
 
-    let path = PathBuf::from(local_path);
+    // Unescape shell backslashes (e.g. Call\ of\ Duty → Call of Duty)
+    let unescaped = local_path.replace("\\ ", " ");
+    let path = PathBuf::from(&unescaped);
     if !path.exists() {
-        eprintln!("  Not found: {}", local_path);
+        eprintln!("  Not found: {}", unescaped);
         return;
     }
 

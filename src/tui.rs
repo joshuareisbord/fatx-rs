@@ -155,6 +155,24 @@ struct App {
     cancel_flag: Arc<AtomicBool>,
 }
 
+/// Unescape shell-style backslash escapes in a path string.
+/// Converts `Call\ of\ Duty` → `Call of Duty`, `file\\name` → `file\name`.
+fn unescape_path(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                result.push(next);
+                chars.next();
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn dirs_or_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -954,7 +972,7 @@ fn handle_input_key(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, key: KeyEvent) 
                 // Download
                 let name = app.selected_name().unwrap_or_default();
                 let fatx_path = app.full_path(&name);
-                let local_path = PathBuf::from(&input);
+                let local_path = PathBuf::from(unescape_path(&input));
                 app.download_dir = local_path
                     .parent()
                     .unwrap_or(&PathBuf::from("."))
@@ -966,8 +984,8 @@ fn handle_input_key(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, key: KeyEvent) 
                 });
                 app.is_busy = true;
             } else if app.input_prompt.starts_with("Upload ") {
-                // Upload file or directory
-                let path = PathBuf::from(&input);
+                // Upload file or directory — unescape shell backslashes (e.g. Call\ of\ Duty)
+                let path = PathBuf::from(unescape_path(&input));
                 if !path.exists() {
                     app.set_error(&format!("Not found: {}", input));
                     return;
@@ -1160,5 +1178,43 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     .border_style(Style::default().fg(Color::Gray)),
             );
         frame.render_widget(status_bar, chunks[2]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unescape_backslash_spaces() {
+        assert_eq!(unescape_path(r"Call\ of\ Duty"), "Call of Duty");
+    }
+
+    #[test]
+    fn test_unescape_no_escapes() {
+        assert_eq!(unescape_path("normal_path"), "normal_path");
+    }
+
+    #[test]
+    fn test_unescape_mixed() {
+        assert_eq!(
+            unescape_path(r"/Users/josh/My\ Games/Call\ of\ Duty\ -\ Black\ Ops"),
+            "/Users/josh/My Games/Call of Duty - Black Ops"
+        );
+    }
+
+    #[test]
+    fn test_unescape_double_backslash() {
+        assert_eq!(unescape_path(r"file\\name"), r"file\name");
+    }
+
+    #[test]
+    fn test_unescape_trailing_backslash() {
+        assert_eq!(unescape_path(r"path\"), "path");
+    }
+
+    #[test]
+    fn test_unescape_empty() {
+        assert_eq!(unescape_path(""), "");
     }
 }
