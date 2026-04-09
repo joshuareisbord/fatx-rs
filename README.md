@@ -1,5 +1,7 @@
 # fatx-rs
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 A Rust toolkit for reading, writing, and mounting FATX/XTAF file systems used by Xbox and Xbox 360 consoles. Connect a drive via USB to macOS and browse, extract, modify, or mount files directly in Finder.
 
 > **Status:** Under active development. Core operations work on real hardware. See [v0.2.0 changelog](#v020---performance--reliability) for recent improvements.
@@ -258,4 +260,11 @@ Major optimization pass validated on a physical 1TB Xbox 360 drive:
 
 ## License
 
-See LICENSE file for details.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+You are free to use, modify, and distribute this software, provided you:
+- **Keep the copyright notice and attribution** in any copies or derivative works
+- **State any changes** you made to the original files
+- **Include the LICENSE and NOTICE files** when redistributing
+
+See [NOTICE](NOTICE) for attribution requirements.

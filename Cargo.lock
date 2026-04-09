@@ -549,7 +549,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fatx-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "fatx-mkimage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "fatxlib",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "fatx-mount"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "fatxlib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
