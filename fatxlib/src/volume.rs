@@ -1305,6 +1305,87 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         Ok(())
     }
 
+    /// Prepare a file for in-place writing: extend or shrink the cluster chain
+    /// as needed and update the directory entry size. Returns the cluster chain
+    /// that the caller should write data to (one cluster at a time).
+    ///
+    /// This separates the fast FAT operations (chain management) from the slow
+    /// data writing (USB I/O), allowing callers to release locks between cluster
+    /// writes to avoid blocking other operations.
+    ///
+    /// After calling this, write data to each cluster in the returned chain using
+    /// `write_cluster()`, then call `flush()` to persist FAT changes.
+    pub fn prepare_write_in_place(&mut self, path: &str, new_size: usize) -> Result<Vec<u32>> {
+        let (parent_path, filename) = split_path(path);
+        let parent = self.resolve_path(parent_path)?;
+        let target = self.resolve_path(path)?;
+
+        if target.is_directory() {
+            return Err(FatxError::IsADirectory(path.to_string()));
+        }
+
+        let cluster_size = self.superblock.cluster_size() as usize;
+        let clusters_needed = if new_size == 0 { 1 } else { new_size.div_ceil(cluster_size) };
+
+        let old_chain = self.read_chain(target.first_cluster)?;
+        let old_count = old_chain.len();
+
+        // Extend chain if file grew
+        if clusters_needed > old_count {
+            let extra = clusters_needed - old_count;
+            let last_old = *old_chain.last().unwrap();
+
+            let end = FIRST_CLUSTER + self.total_clusters;
+            let start_from = if self.prev_free + 1 >= end { FIRST_CLUSTER } else { self.prev_free + 1 };
+            let mut new_clusters = Vec::with_capacity(extra);
+            let mut cursor = start_from;
+
+            while new_clusters.len() < extra {
+                match self.bitmap_find_free(cursor, end) {
+                    Some(c) => { new_clusters.push(c); cursor = c + 1; }
+                    None => break,
+                }
+            }
+            if new_clusters.len() < extra && start_from > FIRST_CLUSTER {
+                cursor = FIRST_CLUSTER;
+                while new_clusters.len() < extra {
+                    match self.bitmap_find_free(cursor, start_from) {
+                        Some(c) => { new_clusters.push(c); cursor = c + 1; }
+                        None => break,
+                    }
+                }
+            }
+            if new_clusters.len() < extra {
+                return Err(FatxError::DiskFull);
+            }
+            if let Some(&last) = new_clusters.last() {
+                self.prev_free = last;
+            }
+
+            self.write_fat_entry(last_old, FatEntry::Next(new_clusters[0]))?;
+            for i in 0..new_clusters.len() - 1 {
+                self.write_fat_entry(new_clusters[i], FatEntry::Next(new_clusters[i + 1]))?;
+            }
+            self.write_fat_entry(*new_clusters.last().unwrap(), FatEntry::EndOfChain)?;
+        }
+
+        // Get the full chain (may have been extended)
+        let chain = self.read_chain(target.first_cluster)?;
+
+        // Free excess clusters if file shrank
+        if clusters_needed < old_count {
+            self.write_fat_entry(chain[clusters_needed - 1], FatEntry::EndOfChain)?;
+            for &cluster in chain.iter().take(old_count).skip(clusters_needed) {
+                self.write_fat_entry(cluster, FatEntry::Free)?;
+            }
+        }
+
+        // Update directory entry file_size
+        self.update_dirent_size(parent.first_cluster, filename, new_size as u32)?;
+
+        Ok(chain.into_iter().take(clusters_needed).collect())
+    }
+
     /// Update the file_size field of a directory entry on disk.
     /// Finds the entry by name in the parent directory and writes only the
     /// 4-byte size field, leaving everything else untouched.

@@ -1436,38 +1436,59 @@ async fn main() {
                     if !pending.is_empty() {
                         let count = pending.len();
 
-                        // Flush each file individually, releasing the vol lock between
-                        // files so NFS operations can interleave.
-                        // Uses in-place writes (reuses existing clusters) instead of
-                        // delete+recreate. This is dramatically faster for large files
-                        // and avoids the 4+ second vol lock that caused ESTALE timeouts.
+                        // Flush each file with chunked cluster writes.
+                        // The vol lock is held briefly for FAT chain management,
+                        // then released between each cluster write so NFS reads
+                        // (Finder browsing) can interleave.
                         for (cluster, path, data) in pending {
                             let ft = Instant::now();
                             let data_len = data.len();
-                            {
-                                // Hold vol lock ONLY for this one file
-                                let mut vol = vol.write();
 
-                                // Try in-place write first (fast path: reuses clusters)
-                                match vol.write_file_in_place(&path, &data) {
-                                    Ok(()) => {}
+                            // Phase 1: Prepare chain (fast FAT ops — brief lock)
+                            let chain = {
+                                let mut vol = vol.write();
+                                match vol.prepare_write_in_place(&path, data.len()) {
+                                    Ok(chain) => chain,
                                     Err(fatxlib::error::FatxError::FileNotFound(_)) => {
-                                        // File doesn't exist yet — create it
+                                        // File doesn't exist — create it (holds lock for full write)
                                         if let Err(e) = vol.create_file(&path, &data) {
                                             error!("Flush create '{}' failed: {}", path, e);
                                         }
+                                        file_cache.insert(cluster, Bytes::from(data));
+                                        continue;
                                     }
                                     Err(e) => {
-                                        // In-place failed for another reason — fall back
-                                        warn!("In-place write '{}' failed: {}, falling back to delete+recreate", path, e);
-                                        let _ = vol.delete(&path);
-                                        if let Err(e2) = vol.create_file(&path, &data) {
-                                            error!("Flush recreate '{}' failed: {}", path, e2);
-                                        }
+                                        error!("Flush prepare '{}' failed: {}", path, e);
+                                        continue;
                                     }
                                 }
+                            };
+                            // Vol lock released — NFS ops can proceed between clusters
+
+                            // Phase 2: Write data cluster-by-cluster, releasing lock between each
+                            let cluster_size = {
+                                let vol = vol.read();
+                                vol.superblock.cluster_size() as usize
+                            };
+                            let mut offset = 0usize;
+                            for &c in &chain {
+                                let end = (offset + cluster_size).min(data.len());
+                                let mut cluster_buf = vec![0u8; cluster_size];
+                                if offset < data.len() {
+                                    let len = end - offset;
+                                    cluster_buf[..len].copy_from_slice(&data[offset..end]);
+                                }
+                                {
+                                    let mut vol = vol.write();
+                                    if let Err(e) = vol.write_cluster(c, &cluster_buf) {
+                                        error!("Flush cluster {} for '{}' failed: {}", c, path, e);
+                                        break;
+                                    }
+                                }
+                                // Lock released — NFS reads can proceed
+                                offset += cluster_size;
+                                if offset >= data.len() { break; }
                             }
-                            // Vol lock released — NFS ops can proceed
 
                             // Update file cache with the flushed data
                             file_cache.insert(cluster, Bytes::from(data));
