@@ -32,7 +32,7 @@ bash setup.sh
 
 ## Testing
 
-All changes must pass the full test suite (125+ tests):
+All changes must pass the full test suite:
 
 ```bash
 cargo test --workspace

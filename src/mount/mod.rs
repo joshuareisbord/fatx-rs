@@ -1,12 +1,7 @@
-//! fatx-mount: Mount Xbox FATX/XTAF file systems via a local NFS server.
+//! Mount Xbox FATX/XTAF file systems via a local NFS server.
 //!
 //! Starts a localhost NFSv3 server backed by a FATX volume, then mounts it
 //! so it appears as a regular volume in Finder.
-//!
-//! Usage:
-//!   sudo fatx-mount /dev/rdisk4 --partition "360 Data"
-//!   # Drive appears in Finder. Unmount from Finder or:
-//!   umount /Volumes/Xbox\ Drive
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -21,7 +16,7 @@ use parking_lot::{Mutex, RwLock};
 use quick_cache::sync::Cache;
 
 use async_trait::async_trait;
-use clap::Parser;
+// clap::Args derived on MountArgs
 use log::{debug, error, info, warn};
 use nfsserve::nfs::{
     fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, specdata3,
@@ -954,16 +949,12 @@ fn get_device_size(file: &mut File) -> u64 {
     0
 }
 
-#[derive(Parser)]
-#[command(
-    name = "fatx-mount",
-    about = "Mount Xbox FATX/XTAF file systems (shows in Finder)",
-    version
-)]
-struct Cli {
+#[derive(clap::Args)]
+#[command(about = "Mount Xbox FATX/XTAF file systems (shows in Finder)")]
+pub struct MountArgs {
     /// Device or disk image to mount
     #[arg(required_unless_present = "cleanup")]
-    device: Option<PathBuf>,
+    pub device: Option<PathBuf>,
 
     /// Partition name (e.g. "360 Data", "Data (E)")
     #[arg(long)]
@@ -1009,10 +1000,13 @@ struct Cli {
     cleanup: bool,
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
+/// Entry point for the mount subcommand. Creates a tokio runtime and runs the async main.
+pub fn run(cli: MountArgs) {
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    rt.block_on(async_main(cli));
+}
 
+async fn async_main(cli: MountArgs) {
     let log_level = if cli.trace {
         "debug"
     } else if cli.verbose {
