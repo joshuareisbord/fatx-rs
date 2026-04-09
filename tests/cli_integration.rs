@@ -208,6 +208,293 @@ fn test_cli_read_file() {
 }
 
 // ===========================================================================
+// fatx write
+// ===========================================================================
+
+#[test]
+fn test_cli_write_and_read_roundtrip() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    // Write a local file into the image
+    let input_dir = TempDir::new().unwrap();
+    let input_file = input_dir.path().join("hello.txt");
+    std::fs::write(&input_file, b"Hello from CLI write test!").unwrap();
+
+    let output = fatx_bin()
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/hello.txt",
+            "--input",
+            input_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run fatx write");
+
+    assert!(output.status.success(), "write failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Read it back
+    let output = fatx_bin()
+        .args(["read", img.to_str().unwrap(), "/hello.txt"])
+        .output()
+        .expect("run fatx read");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Hello from CLI write test!"
+    );
+}
+
+#[test]
+fn test_cli_write_large_file() {
+    let (_tmp, img) = create_test_image(16, false);
+
+    let input_dir = TempDir::new().unwrap();
+    let input_file = input_dir.path().join("large.bin");
+    let data: Vec<u8> = (0..65536u32).map(|i| (i % 256) as u8).collect();
+    std::fs::write(&input_file, &data).unwrap();
+
+    let output = fatx_bin()
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/large.bin",
+            "--input",
+            input_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run fatx write large");
+
+    assert!(output.status.success(), "write large failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Verify it's listed
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .expect("run fatx ls");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("large.bin"));
+}
+
+// ===========================================================================
+// fatx mkdir
+// ===========================================================================
+
+#[test]
+fn test_cli_mkdir() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    let output = fatx_bin()
+        .args(["mkdir", img.to_str().unwrap(), "/TestDir"])
+        .output()
+        .expect("run fatx mkdir");
+
+    assert!(output.status.success(), "mkdir failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Verify it's listed
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .expect("run fatx ls");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("TestDir"));
+}
+
+#[test]
+fn test_cli_mkdir_nested() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    fatx_bin()
+        .args(["mkdir", img.to_str().unwrap(), "/Parent"])
+        .output()
+        .expect("mkdir parent")
+        .status
+        .success()
+        .then_some(())
+        .expect("mkdir parent failed");
+
+    let output = fatx_bin()
+        .args(["mkdir", img.to_str().unwrap(), "/Parent/Child"])
+        .output()
+        .expect("run fatx mkdir nested");
+
+    assert!(output.status.success(), "nested mkdir failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/Parent"])
+        .output()
+        .expect("ls parent");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Child"));
+}
+
+// ===========================================================================
+// fatx rm
+// ===========================================================================
+
+#[test]
+fn test_cli_rm_file() {
+    let (_tmp, img) = create_test_image(256, true);
+
+    // Verify file exists
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("name.txt"));
+
+    // Delete it
+    let output = fatx_bin()
+        .args(["rm", img.to_str().unwrap(), "/name.txt"])
+        .output()
+        .expect("run fatx rm");
+
+    assert!(output.status.success(), "rm failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Verify it's gone
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("name.txt"));
+}
+
+#[test]
+fn test_cli_rm_nonexistent_fails() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    let output = fatx_bin()
+        .args(["rm", img.to_str().unwrap(), "/nonexistent.txt"])
+        .output()
+        .expect("run fatx rm nonexistent");
+
+    assert!(!output.status.success());
+}
+
+// ===========================================================================
+// fatx rename
+// ===========================================================================
+
+#[test]
+fn test_cli_rename() {
+    let (_tmp, img) = create_test_image(256, true);
+
+    let output = fatx_bin()
+        .args(["rename", img.to_str().unwrap(), "/name.txt", "renamed.txt"])
+        .output()
+        .expect("run fatx rename");
+
+    assert!(output.status.success(), "rename failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("name.txt"), "old name should be gone");
+    assert!(stdout.contains("renamed.txt"), "new name should be present");
+}
+
+// ===========================================================================
+// fatx rmr (recursive delete)
+// ===========================================================================
+
+#[test]
+fn test_cli_rmr() {
+    let (_tmp, img) = create_test_image(256, true);
+
+    // Content/ has subdirectories and files
+    let output = fatx_bin()
+        .args(["rmr", img.to_str().unwrap(), "/Content"])
+        .output()
+        .expect("run fatx rmr");
+
+    assert!(output.status.success(), "rmr failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .unwrap();
+
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Content"), "Content should be deleted");
+}
+
+// ===========================================================================
+// fatx hexdump
+// ===========================================================================
+
+#[test]
+fn test_cli_hexdump() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    let output = fatx_bin()
+        .args(["hexdump", img.to_str().unwrap(), "--count", "64"])
+        .output()
+        .expect("run fatx hexdump");
+
+    assert!(output.status.success(), "hexdump failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should contain the FATX magic bytes in hex
+    assert!(
+        stdout.contains("46 41 54 58") || stdout.contains("46414458") || stdout.contains("FATX"),
+        "hexdump should show FATX magic: {}",
+        stdout
+    );
+}
+
+// ===========================================================================
+// fatx mkimage (via the fatx dispatcher)
+// ===========================================================================
+
+#[test]
+fn test_cli_mkimage() {
+    let tmp = TempDir::new().unwrap();
+    let img = tmp.path().join("new.img");
+
+    let output = fatx_bin()
+        .args(["mkimage", img.to_str().unwrap(), "--size", "4M"])
+        .output()
+        .expect("run fatx mkimage");
+
+    assert!(output.status.success(), "mkimage failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(img.exists(), "image file should be created");
+
+    // Verify the image is valid by running info on it
+    let output = fatx_bin()
+        .args(["info", img.to_str().unwrap()])
+        .output()
+        .expect("run fatx info on new image");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("FATX Volume Information"));
+}
+
+#[test]
+fn test_cli_mkimage_xtaf() {
+    let tmp = TempDir::new().unwrap();
+    let img = tmp.path().join("xbox360.img");
+
+    let output = fatx_bin()
+        .args(["mkimage", img.to_str().unwrap(), "--size", "4M", "--format", "xtaf"])
+        .output()
+        .expect("run fatx mkimage xtaf");
+
+    assert!(output.status.success(), "mkimage xtaf failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let output = fatx_bin()
+        .args(["info", img.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+}
+
+// ===========================================================================
 // fatx scan
 // ===========================================================================
 
