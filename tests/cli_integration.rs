@@ -355,6 +355,144 @@ fn test_cli_mkdir_nested() {
 }
 
 // ===========================================================================
+// Files and directories with spaces in names
+// ===========================================================================
+
+#[test]
+fn test_cli_write_file_with_spaces() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    let input_dir = TempDir::new().unwrap();
+    let input_file = input_dir.path().join("my game save.dat");
+    std::fs::write(&input_file, b"save data with spaces").unwrap();
+
+    let output = fatx_bin()
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/my game save.dat",
+            "--input",
+            input_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run fatx write with spaces");
+
+    assert!(
+        output.status.success(),
+        "write with spaces failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = fatx_bin()
+        .args(["read", img.to_str().unwrap(), "/my game save.dat"])
+        .output()
+        .expect("read file with spaces");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "save data with spaces"
+    );
+}
+
+#[test]
+fn test_cli_mkdir_with_spaces() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    let output = fatx_bin()
+        .args(["mkdir", img.to_str().unwrap(), "/My Game Folder"])
+        .output()
+        .expect("run fatx mkdir with spaces");
+
+    assert!(
+        output.status.success(),
+        "mkdir with spaces failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .unwrap();
+
+    assert!(String::from_utf8_lossy(&output.stdout).contains("My Game Folder"));
+}
+
+#[test]
+fn test_cli_copy_dir_with_spaces() {
+    let (_tmp, img) = create_test_image(16, false);
+
+    // Create a local directory with spaces in its name
+    let input_dir = TempDir::new().unwrap();
+    let src = input_dir.path().join("Call of Duty");
+    std::fs::create_dir_all(src.join("sub folder")).unwrap();
+    std::fs::write(src.join("readme.txt"), b"game data").unwrap();
+    std::fs::write(src.join("sub folder").join("level 1.dat"), b"level data").unwrap();
+
+    let output = fatx_bin()
+        .args([
+            "copy",
+            img.to_str().unwrap(),
+            "--from",
+            src.to_str().unwrap(),
+            "--to",
+            "/Call of Duty",
+        ])
+        .output()
+        .expect("run fatx copy with spaces");
+
+    assert!(
+        output.status.success(),
+        "copy with spaces failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify the directory structure
+    let output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/Call of Duty"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("readme.txt"), "should contain readme.txt");
+    assert!(stdout.contains("sub folder"), "should contain sub folder");
+}
+
+#[test]
+fn test_cli_rm_file_with_spaces() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    // Create file with spaces
+    let input_dir = TempDir::new().unwrap();
+    let input_file = input_dir.path().join("my file.txt");
+    std::fs::write(&input_file, b"data").unwrap();
+
+    fatx_bin()
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/my file.txt",
+            "--input",
+            input_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    // Delete it
+    let output = fatx_bin()
+        .args(["rm", img.to_str().unwrap(), "/my file.txt"])
+        .output()
+        .expect("rm file with spaces");
+
+    assert!(
+        output.status.success(),
+        "rm with spaces failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ===========================================================================
 // fatx rm
 // ===========================================================================
 
