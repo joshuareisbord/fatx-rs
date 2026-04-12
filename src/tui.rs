@@ -86,6 +86,12 @@ enum IoCmd {
         path: String,
         new_name: String,
     },
+    ScanCleanup {
+        path: String,
+    },
+    DeleteCleanup {
+        paths: Vec<String>,
+    },
     Stats,
     Flush,
     Shutdown,
@@ -115,6 +121,9 @@ enum IoResp {
         free_size: u64,
         used_size: u64,
     },
+    CleanupScanResult {
+        entries: Vec<(String, bool, u64)>, // (path, is_dir, size)
+    },
     Flushed,
     Cancelled {
         message: String,
@@ -134,6 +143,7 @@ enum InputMode {
     MkdirName,
     RenameName,
     ConfirmDelete,
+    ConfirmCleanup,
 }
 
 struct App {
@@ -153,6 +163,8 @@ struct App {
     is_busy: bool,
     /// Shared cancel flag — set by UI, checked by I/O worker.
     cancel_flag: Arc<AtomicBool>,
+    /// Pending cleanup paths awaiting user confirmation.
+    pending_cleanup: Vec<(String, bool, u64)>,
 }
 
 /// Unescape shell-style backslash escapes in a path string.
@@ -196,6 +208,7 @@ impl App {
             download_dir: dirs_or_home(),
             is_busy: false,
             cancel_flag,
+            pending_cleanup: Vec::new(),
         }
     }
 
@@ -603,6 +616,54 @@ fn io_worker(
                 }
             },
 
+            IoCmd::ScanCleanup { path } => {
+                match vol.scan_macos_metadata_from(&path) {
+                    Ok(found) => {
+                        let entries: Vec<(String, bool, u64)> = found
+                            .iter()
+                            .map(|e| (e.path.clone(), e.is_dir, e.size))
+                            .collect();
+                        let _ = resp_tx.send(IoResp::CleanupScanResult { entries });
+                    }
+                    Err(e) => {
+                        let _ = resp_tx.send(IoResp::Error {
+                            message: format!("Scan error: {}", e),
+                        });
+                    }
+                }
+            }
+
+            IoCmd::DeleteCleanup { paths } => {
+                let mut files = 0usize;
+                let mut dirs = 0usize;
+                let mut bytes = 0u64;
+                for path in &paths {
+                    let entry = match vol.resolve_path(path) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    if entry.is_directory() {
+                        if vol.delete_recursive(path).is_ok() {
+                            dirs += 1;
+                        }
+                    } else {
+                        bytes += entry.file_size as u64;
+                        if vol.delete(path).is_ok() {
+                            files += 1;
+                        }
+                    }
+                }
+                let _ = vol.flush();
+                let _ = resp_tx.send(IoResp::Done {
+                    message: format!(
+                        "Removed {} file(s), {} dir(s), freed {}",
+                        files,
+                        dirs,
+                        format_size(bytes)
+                    ),
+                });
+            }
+
             IoCmd::Flush => {
                 let _ = vol.flush();
                 let _ = resp_tx.send(IoResp::Flushed);
@@ -818,6 +879,33 @@ fn handle_io_response(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, resp: IoResp)
             app.should_quit = true;
         }
 
+        IoResp::CleanupScanResult { entries } => {
+            app.is_busy = false;
+            if entries.is_empty() {
+                app.set_status("No macOS metadata found.");
+            } else {
+                let file_count = entries.iter().filter(|e| !e.1).count();
+                let dir_count = entries.iter().filter(|e| e.1).count();
+                let total_bytes: u64 = entries.iter().map(|e| e.2).sum();
+                let names: Vec<&str> = entries.iter().map(|e| e.0.as_str()).collect();
+                let preview = if names.len() <= 5 {
+                    names.join(", ")
+                } else {
+                    format!("{}, ... and {} more", names[..5].join(", "), names.len() - 5)
+                };
+                app.pending_cleanup = entries;
+                app.input_prompt = format!(
+                    "Found {} file(s), {} dir(s) ({}) — {}. Delete? (y/n):",
+                    file_count,
+                    dir_count,
+                    format_size(total_bytes),
+                    preview,
+                );
+                app.input_buffer.clear();
+                app.input_mode = InputMode::ConfirmCleanup;
+            }
+        }
+
         IoResp::Cancelled { message } => {
             app.is_busy = false;
             app.cancel_flag.store(false, Ordering::Relaxed);
@@ -961,6 +1049,13 @@ fn handle_normal_key(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, key: KeyEvent)
             app.is_busy = true;
             app.set_status("Loading stats...");
         }
+        KeyCode::Char('c') => {
+            let _ = cmd_tx.send(IoCmd::ScanCleanup {
+                path: app.cwd.clone(),
+            });
+            app.is_busy = true;
+            app.set_status("Scanning for macOS metadata...");
+        }
         _ => {}
     }
 }
@@ -1054,13 +1149,31 @@ fn handle_input_key(app: &mut App, cmd_tx: &mpsc::Sender<IoCmd>, key: KeyEvent) 
                 } else {
                     app.set_status("Delete cancelled.");
                 }
+            } else if app.input_prompt.contains("Delete? (y/n):") {
+                // Confirm cleanup
+                if input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
+                    let paths: Vec<String> = app
+                        .pending_cleanup
+                        .drain(..)
+                        .map(|(path, _, _)| path)
+                        .collect();
+                    let count = paths.len();
+                    app.set_status(&format!("Deleting {} metadata entries...", count));
+                    let _ = cmd_tx.send(IoCmd::DeleteCleanup { paths });
+                    app.is_busy = true;
+                } else {
+                    app.pending_cleanup.clear();
+                    app.set_status("Cleanup cancelled.");
+                }
             }
         }
         KeyCode::Backspace => {
             app.input_buffer.pop();
         }
         KeyCode::Char(c) => {
-            if app.input_mode == InputMode::ConfirmDelete {
+            if app.input_mode == InputMode::ConfirmDelete
+                || app.input_mode == InputMode::ConfirmCleanup
+            {
                 app.input_buffer = c.to_string();
             } else {
                 app.input_buffer.push(c);
@@ -1174,7 +1287,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let help = if app.is_busy {
             " Esc: cancel "
         } else {
-            " d:download  u:upload  n:mkdir  D:delete  r:rename  i:info  q:quit "
+            " d:download  u:upload  n:mkdir  D:delete  r:rename  i:info  c:cleanup  q:quit "
         };
         let status_bar = Paragraph::new(format!(" {}", app.status))
             .style(style)

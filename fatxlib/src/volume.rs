@@ -1553,11 +1553,20 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         Ok(())
     }
 
-    /// Scan the volume for macOS metadata files without deleting anything.
+    /// Scan the entire volume for macOS metadata files without deleting anything.
     /// Returns a list of matching entries.
     pub fn scan_macos_metadata(&mut self) -> Result<Vec<MacosMetadataEntry>> {
+        self.scan_macos_metadata_from("/")
+    }
+
+    /// Scan from a specific directory path for macOS metadata files.
+    pub fn scan_macos_metadata_from(&mut self, path: &str) -> Result<Vec<MacosMetadataEntry>> {
+        let entry = self.resolve_path(path)?;
+        if !entry.is_directory() {
+            return Err(FatxError::NotADirectory(path.to_string()));
+        }
         let mut found = Vec::new();
-        self.scan_macos_metadata_inner("/", FIRST_CLUSTER, &mut found)?;
+        self.scan_macos_metadata_inner(path, entry.first_cluster, &mut found)?;
         Ok(found)
     }
 

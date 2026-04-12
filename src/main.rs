@@ -146,7 +146,8 @@ struct JsonSuccess {
 enum Commands {
     /// Interactive TUI file browser — navigate, download, and upload files
     Browse {
-        device: PathBuf,
+        /// Device or disk image (omit for guided selection)
+        device: Option<PathBuf>,
         #[arg(long, value_parser = parse_hex_or_dec, default_value = "0")]
         offset: u64,
         #[arg(long, value_parser = parse_hex_or_dec, default_value = "0")]
@@ -1557,6 +1558,20 @@ fn main() {
             size,
             partition,
         }) => {
+            let (device, partition) = if let Some(dev) = device {
+                (dev, partition)
+            } else {
+                // Guided mode
+                println!();
+                println!("========================================");
+                println!("  fatx browse — guided setup");
+                println!("========================================");
+                println!();
+                match guided_partition_selection() {
+                    Some(sel) => (sel.device_path, Some(sel.partition_name)),
+                    None => process::exit(0),
+                }
+            };
             let part_name = partition
                 .clone()
                 .unwrap_or_else(|| "FATX Volume".to_string());
