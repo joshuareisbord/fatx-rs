@@ -1800,7 +1800,9 @@ impl FatxVolume<File> {
 
         let mut read = 0usize;
         while read < buf.len() {
-            let n = self.inner.read_at(&mut buf[read..], abs_offset + read as u64)?;
+            let n = self
+                .inner
+                .read_at(&mut buf[read..], abs_offset + read as u64)?;
             if n == 0 {
                 return Err(FatxError::Io(std::io::Error::from(
                     std::io::ErrorKind::UnexpectedEof,

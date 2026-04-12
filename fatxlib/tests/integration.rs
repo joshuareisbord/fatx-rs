@@ -245,7 +245,10 @@ fn test_read_file_range_shared_across_clusters() {
     let read = vol
         .read_file_range_shared(&entry, offset, count)
         .expect("shared range read");
-    assert_eq!(read, data[offset as usize..offset as usize + count].to_vec());
+    assert_eq!(
+        read,
+        data[offset as usize..offset as usize + count].to_vec()
+    );
 }
 
 // ===========================================================================
