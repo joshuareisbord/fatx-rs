@@ -2131,6 +2131,53 @@ fn main() {
             }
         }
 
+        Some(Commands::Cleanup {
+            device,
+            offset,
+            size,
+            partition,
+        }) => {
+            let mut vol = open_volume(&device, &partition, offset, size);
+            let progress = |path: &str| {
+                if !json {
+                    eprintln!("  Deleting {}", path);
+                }
+            };
+            match vol.cleanup_macos_metadata(Some(&progress)) {
+                Ok((files, dirs, bytes)) => {
+                    vol.flush().unwrap();
+                    let msg = format!(
+                        "Removed {} file(s), {} dir(s), freed {}",
+                        files,
+                        dirs,
+                        format_size(bytes)
+                    );
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "success": true,
+                                "message": msg,
+                                "files_deleted": files,
+                                "dirs_deleted": dirs,
+                                "bytes_freed": bytes
+                            })
+                        );
+                    } else {
+                        println!("{}", msg);
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        println!("{}", serde_json::json!({"error": format!("{}", e)}));
+                        process::exit(0);
+                    }
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+
         Some(Commands::Mount(mut args)) => {
             // Guided mode: no device specified and not a cleanup run
             if args.device.is_none() && !args.cleanup {

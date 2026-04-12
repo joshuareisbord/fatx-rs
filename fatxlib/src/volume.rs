@@ -1553,6 +1553,70 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         Ok(())
     }
 
+    /// Recursively walk the volume and delete macOS metadata files
+    /// (.DS_Store, ._ prefixed, .Spotlight-V100, .Trashes, .fseventsd).
+    /// Returns (files_deleted, dirs_deleted, bytes_freed).
+    pub fn cleanup_macos_metadata(
+        &mut self,
+        progress: Option<&dyn Fn(&str)>,
+    ) -> Result<(usize, usize, u64)> {
+        self.cleanup_macos_metadata_inner("/", progress)
+    }
+
+    fn cleanup_macos_metadata_inner(
+        &mut self,
+        dir_path: &str,
+        progress: Option<&dyn Fn(&str)>,
+    ) -> Result<(usize, usize, u64)> {
+        let dir_entry = self.resolve_path(dir_path)?;
+        let entries = self.read_directory(dir_entry.first_cluster)?;
+
+        let mut files_deleted = 0usize;
+        let mut dirs_deleted = 0usize;
+        let mut bytes_freed = 0u64;
+
+        // Collect names first to avoid borrow issues during deletion
+        let children: Vec<(String, bool, u32)> = entries
+            .iter()
+            .map(|e| (e.filename(), e.is_directory(), e.file_size))
+            .collect();
+
+        for (name, is_dir, file_size) in children {
+            let child_path = if dir_path == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", dir_path, name)
+            };
+
+            if crate::types::is_macos_metadata(&name) {
+                if let Some(cb) = &progress {
+                    cb(&child_path);
+                }
+                if is_dir {
+                    if let Err(e) = self.delete_recursive(&child_path) {
+                        warn!("cleanup: failed to delete dir '{}': {}", child_path, e);
+                        continue;
+                    }
+                    dirs_deleted += 1;
+                } else {
+                    bytes_freed += file_size as u64;
+                    if let Err(e) = self.delete(&child_path) {
+                        warn!("cleanup: failed to delete '{}': {}", child_path, e);
+                        continue;
+                    }
+                    files_deleted += 1;
+                }
+            } else if is_dir {
+                let (fc, dc, bf) = self.cleanup_macos_metadata_inner(&child_path, progress)?;
+                files_deleted += fc;
+                dirs_deleted += dc;
+                bytes_freed += bf;
+            }
+        }
+
+        Ok((files_deleted, dirs_deleted, bytes_freed))
+    }
+
     /// Recursively copy a local directory tree into the FATX volume.
     /// Opens volume once and writes all files/dirs in a single session.
     #[allow(clippy::type_complexity)]

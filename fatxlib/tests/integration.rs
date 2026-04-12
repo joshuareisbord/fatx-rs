@@ -900,3 +900,29 @@ fn test_is_macos_metadata() {
     assert!(!is_macos_metadata(".hidden"));
     assert!(!is_macos_metadata("DS_Store")); // no leading dot
 }
+
+/// cleanup_macos_metadata should remove macOS files from the volume.
+#[test]
+fn test_cleanup_macos_metadata() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    // Create a mix of real files and macOS junk
+    vol.create_directory("/Content").expect("mkdir");
+    vol.create_file("/Content/game.bin", b"real data").expect("create game");
+    vol.create_file("/Content/.DS_Store", b"junk").expect("create ds_store");
+    vol.create_file("/Content/._game.bin", b"resource fork").expect("create resource");
+    vol.create_file("/.DS_Store", b"root junk").expect("create root ds_store");
+
+    let (files, dirs, bytes) = vol.cleanup_macos_metadata(None).expect("cleanup");
+
+    assert_eq!(files, 3, "should delete 3 metadata files");
+    assert_eq!(dirs, 0, "no metadata dirs in this test");
+    assert!(bytes > 0, "should free some bytes");
+
+    // Real files survive
+    assert!(vol.resolve_path("/Content/game.bin").is_ok());
+    // Junk is gone
+    assert!(vol.resolve_path("/Content/.DS_Store").is_err());
+    assert!(vol.resolve_path("/Content/._game.bin").is_err());
+    assert!(vol.resolve_path("/.DS_Store").is_err());
+}
