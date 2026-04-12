@@ -356,7 +356,7 @@ fn io_worker(
             } => match fs::read(&local_path) {
                 Ok(data) => {
                     let size = data.len() as u64;
-                    match vol.create_file(&fatx_path, &data) {
+                    match vol.create_or_replace_file(&fatx_path, &data) {
                         Ok(_) => {
                             let _ = vol.flush();
                             let _ = resp_tx.send(IoResp::Done {
@@ -402,6 +402,8 @@ fn io_worker(
                 let mut bytes_done = 0u64;
                 let mut files_done = 0usize;
                 let mut cancelled = false;
+                let mut files_since_flush = 0usize;
+                let mut bytes_since_flush = 0u64;
 
                 let cluster_size = vol.superblock.cluster_size() as usize;
 
@@ -444,17 +446,18 @@ fn io_worker(
 
                     // For large files (>1MB): chunked write with per-cluster progress
                     if data.len() > 1_048_576 {
-                        // Create the file first (allocates clusters)
-                        if vol.create_file(fatx_path, &[]).is_err() {
-                            // If empty create fails, try directly with data
-                            if let Err(e2) = vol.create_file(fatx_path, &data) {
+                        // Create the file first (allocates clusters).
+                        // FileExists is fine — prepare_write_in_place below
+                        // handles both new and existing files.
+                        match vol.create_file(fatx_path, &[]) {
+                            Ok(()) => {}
+                            Err(fatxlib::error::FatxError::FileExists(_)) => {}
+                            Err(e) => {
                                 let _ = resp_tx.send(IoResp::Error {
-                                    message: format!("{}: {}", fatx_path, e2),
+                                    message: format!("{}: {}", fatx_path, e),
                                 });
                                 continue;
                             }
-                            bytes_done += file_size;
-                            continue;
                         }
                         // Now write in place with progress
                         match vol.prepare_write_in_place(fatx_path, data.len()) {
@@ -504,6 +507,8 @@ fn io_worker(
                                     break;
                                 }
                                 bytes_done += file_size;
+                                files_since_flush += 1;
+                                bytes_since_flush += file_size;
                             }
                             Err(e) => {
                                 let _ = resp_tx.send(IoResp::Error {
@@ -517,6 +522,23 @@ fn io_worker(
                         match vol.create_file(fatx_path, &data) {
                             Ok(_) => {
                                 bytes_done += file_size;
+                                files_since_flush += 1;
+                                bytes_since_flush += file_size;
+                            }
+                            Err(fatxlib::error::FatxError::FileExists(_)) => {
+                                match vol.write_file_in_place(fatx_path, &data) {
+                                    Ok(_) => {
+                                        bytes_done += file_size;
+                                        files_since_flush += 1;
+                                        bytes_since_flush += file_size;
+                                    }
+                                    Err(e) => {
+                                        let _ = resp_tx.send(IoResp::Error {
+                                            message: format!("{}: {}", fatx_path, e),
+                                        });
+                                        continue;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 let _ = resp_tx.send(IoResp::Error {
@@ -525,6 +547,18 @@ fn io_worker(
                                 continue;
                             }
                         }
+                    }
+
+                    if files_since_flush >= 100 || bytes_since_flush >= 256 * 1024 * 1024 {
+                        if let Err(e) = vol.flush() {
+                            let _ = resp_tx.send(IoResp::Error {
+                                message: format!("Periodic flush failed: {}", e),
+                            });
+                            cancelled = true;
+                            break;
+                        }
+                        files_since_flush = 0;
+                        bytes_since_flush = 0;
                     }
                 }
 

@@ -1791,11 +1791,15 @@ async fn async_main(cli: MountArgs) {
                     {
                         let mut vol = shutdown_vol.write();
                         for (path, data) in pending.values() {
-                            // Try in-place write; fall back to delete+recreate
+                            // Try in-place write; fall back to delete+recreate.
+                            // The fallback uses delete + create_file directly because
+                            // write_file_in_place already failed — create_or_replace_file
+                            // would just call it again with the same result.
                             match vol.write_file_in_place(path, data) {
                                 Ok(()) => {}
                                 Err(_) => {
-                                    if let Err(e) = vol.create_or_replace_file(path, data) {
+                                    let _ = vol.delete(path);
+                                    if let Err(e) = vol.create_file(path, data) {
                                         eprintln!("[shutdown] Failed to flush '{}': {}", path, e);
                                     }
                                 }

@@ -14,9 +14,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::path::PathBuf;
 use std::process::{self, Command};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use fatxlib::error::FatxError;
 use fatxlib::partition::{detect_xbox_partitions, format_size, DetectedPartition};
 use fatxlib::types::FileAttributes;
 use fatxlib::volume::FatxVolume;
@@ -981,7 +986,7 @@ fn interactive_write(vol: &mut FatxVolume<std::fs::File>, cwd: &str) {
             fatx_path
         );
 
-        match vol.create_file(&fatx_path, &data) {
+        match vol.create_or_replace_file(&fatx_path, &data) {
             Ok(()) => {
                 let _ = vol.flush();
                 println!("  Done!");
@@ -1943,16 +1948,53 @@ fn main() {
                 }
             };
 
-            let (files, dirs, bytes) = vol
-                .copy_from_host(&from, &to, Some(&progress_fn))
-                .unwrap_or_else(|e| {
+            let interrupted = Arc::new(AtomicBool::new(false));
+            let interrupted_handler = Arc::clone(&interrupted);
+            ctrlc::set_handler(move || {
+                interrupted_handler.store(true, Ordering::SeqCst);
+            })
+            .unwrap_or_else(|e| {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"error": format!("failed to install Ctrl-C handler: {}", e)})
+                    );
+                    process::exit(0);
+                }
+                eprintln!("Error: failed to install Ctrl-C handler: {}", e);
+                process::exit(1);
+            });
+
+            let should_abort = || interrupted.load(Ordering::SeqCst);
+            let copy_result = vol.copy_from_host_with_control(
+                &from,
+                &to,
+                Some(&progress_fn),
+                Some(&should_abort),
+                100,
+                256 * 1024 * 1024,
+            );
+            let (files, dirs, bytes) = match copy_result {
+                Ok(result) => result,
+                Err(FatxError::Io(ref io_err))
+                    if io_err.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    if json {
+                        println!("{}", serde_json::json!({"error": "copy interrupted"}));
+                    } else {
+                        eprintln!("Interrupted");
+                    }
+                    process::exit(130);
+                }
+                Err(e) => {
                     if json {
                         println!("{}", serde_json::json!({"error": format!("{}", e)}));
                         process::exit(0);
                     }
                     eprintln!("Error: {}", e);
                     process::exit(1);
-                });
+                }
+            };
             vol.flush().unwrap();
 
             let elapsed = start.elapsed().as_secs_f64();

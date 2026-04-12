@@ -59,6 +59,18 @@ pub struct FatxVolume<T: Read + Write + Seek> {
     free_bitmap: Vec<u64>,
 }
 
+/// Progress callback: `(fatx_path, file_size, total_bytes_so_far)`.
+type ProgressFn<'a> = &'a dyn Fn(&str, u64, u64);
+
+struct CopyFromHostState<'a> {
+    progress: Option<ProgressFn<'a>>,
+    should_abort: Option<&'a dyn Fn() -> bool>,
+    flush_every_files: usize,
+    flush_every_bytes: u64,
+    files_since_flush: usize,
+    bytes_since_flush: u64,
+}
+
 impl<T: Read + Write + Seek> FatxVolume<T> {
     /// Open a FATX volume.
     ///
@@ -1103,6 +1115,12 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let (parent_path, filename) = split_path(path);
         Self::validate_filename(filename)?;
 
+        // `create_file` is strict: callers that want overwrite semantics must
+        // opt into them explicitly via a higher-level helper or policy.
+        if self.resolve_path(path).is_ok() {
+            return Err(FatxError::FileExists(path.to_string()));
+        }
+
         // Resolve parent directory
         let parent = self.resolve_path(parent_path)?;
         if !parent.attributes.contains(FileAttributes::DIRECTORY) {
@@ -1119,44 +1137,60 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         let first_cluster = self.allocate_chain(clusters_needed)?;
 
-        // Write the data
-        let chain = self.read_chain(first_cluster)?;
-        let mut offset = 0;
-        for &cluster in &chain {
-            let end = (offset + cluster_size).min(data.len());
-            if offset < data.len() {
-                let mut cluster_buf = vec![0u8; cluster_size];
-                let len = end - offset;
-                cluster_buf[..len].copy_from_slice(&data[offset..end]);
-                self.write_cluster(cluster, &cluster_buf)?;
+        // If anything after allocation fails, release the new chain so we don't
+        // strand clusters behind an unreachable directory entry.
+        let result = (|| -> Result<()> {
+            // Write the data
+            let chain = self.read_chain(first_cluster)?;
+            let mut offset = 0;
+            for &cluster in &chain {
+                let end = (offset + cluster_size).min(data.len());
+                if offset < data.len() {
+                    let mut cluster_buf = vec![0u8; cluster_size];
+                    let len = end - offset;
+                    cluster_buf[..len].copy_from_slice(&data[offset..end]);
+                    self.write_cluster(cluster, &cluster_buf)?;
+                }
+                offset += cluster_size;
             }
-            offset += cluster_size;
+
+            // Create directory entry — use UTC so Xbox displays correct local time
+            let now = time::OffsetDateTime::now_utc();
+            let date = DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
+            let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
+
+            let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
+            let name_bytes = filename.as_bytes();
+            filename_raw[..name_bytes.len()].copy_from_slice(name_bytes);
+
+            let entry = DirectoryEntry {
+                filename_len: name_bytes.len() as u8,
+                attributes: FileAttributes::ARCHIVE,
+                filename_raw,
+                first_cluster,
+                file_size: data.len() as u32,
+                creation_time: time,
+                creation_date: date,
+                write_time: time,
+                write_date: date,
+                access_time: time,
+                access_date: date,
+            };
+
+            self.add_dirent_to_directory(parent.first_cluster, &entry)?;
+            Ok(())
+        })();
+
+        if let Err(err) = result {
+            if let Err(cleanup_err) = self.free_chain(first_cluster) {
+                warn!(
+                    "create_file cleanup for '{}' failed after error {}: {}",
+                    path, err, cleanup_err
+                );
+            }
+            return Err(err);
         }
 
-        // Create directory entry — use UTC so Xbox displays correct local time
-        let now = time::OffsetDateTime::now_utc();
-        let date = DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
-        let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
-
-        let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
-        let name_bytes = filename.as_bytes();
-        filename_raw[..name_bytes.len()].copy_from_slice(name_bytes);
-
-        let entry = DirectoryEntry {
-            filename_len: name_bytes.len() as u8,
-            attributes: FileAttributes::ARCHIVE,
-            filename_raw,
-            first_cluster,
-            file_size: data.len() as u32,
-            creation_time: time,
-            creation_date: date,
-            write_time: time,
-            write_date: date,
-            access_time: time,
-            access_date: date,
-        };
-
-        self.add_dirent_to_directory(parent.first_cluster, &entry)?;
         info!(
             "Created file '{}' ({} bytes, {} clusters)",
             filename,
@@ -1166,19 +1200,20 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         Ok(())
     }
 
-    /// Create or replace a file at the specified path.
-    ///
-    /// If the file already exists, it is deleted first and then recreated.
-    /// Use this when overwrite-on-conflict is the desired behavior (e.g., NFS
-    /// flush paths). For strict create-only semantics, use `create_file`.
+    /// Create a file if it doesn't exist, otherwise overwrite the existing file
+    /// in place. Callers that want strict create-only semantics should keep
+    /// using `create_file`.
     pub fn create_or_replace_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
         match self.create_file(path, data) {
             Ok(()) => Ok(()),
             Err(FatxError::FileExists(_)) => {
-                self.delete(path)?;
-                self.create_file(path, data)
+                let existing = self.resolve_path(path)?;
+                if existing.is_directory() {
+                    return Err(FatxError::IsADirectory(path.to_string()));
+                }
+                self.write_file_in_place(path, data)
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
@@ -1345,8 +1380,9 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             }
         }
 
-        // ── Phase 4: Update directory entry file_size on disk ──
-        self.update_dirent_size(parent.first_cluster, filename, data.len() as u32)?;
+        // ── Phase 4: Update directory entry size and modification timestamps ──
+        let now = time::OffsetDateTime::now_utc();
+        self.update_dirent_metadata(parent.first_cluster, filename, data.len() as u32, Some(now))?;
 
         info!(
             "Wrote '{}' in-place ({} bytes, {} clusters, was {})",
@@ -1447,16 +1483,25 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             }
         }
 
-        // Update directory entry file_size
-        self.update_dirent_size(parent.first_cluster, filename, new_size as u32)?;
+        // Update directory entry size and write/access timestamps. Callers may
+        // still perform the actual cluster writes later, but this keeps the
+        // overwrite semantics consistent with in-place writes.
+        let now = time::OffsetDateTime::now_utc();
+        self.update_dirent_metadata(parent.first_cluster, filename, new_size as u32, Some(now))?;
 
         Ok(chain.into_iter().take(clusters_needed).collect())
     }
 
-    /// Update the file_size field of a directory entry on disk.
-    /// Finds the entry by name in the parent directory and writes only the
-    /// 4-byte size field, leaving everything else untouched.
-    fn update_dirent_size(&mut self, parent_cluster: u32, name: &str, new_size: u32) -> Result<()> {
+    /// Update selected mutable metadata for a directory entry on disk.
+    /// `creation_*` is preserved for overwrites; write/access timestamps are
+    /// refreshed when `touch` is provided.
+    fn update_dirent_metadata(
+        &mut self,
+        parent_cluster: u32,
+        name: &str,
+        new_size: u32,
+        touch: Option<time::OffsetDateTime>,
+    ) -> Result<()> {
         let chain = self.read_chain(parent_cluster)?;
         let cluster_size = self.superblock.cluster_size() as usize;
         let entries_per_cluster = cluster_size / DIRENT_SIZE;
@@ -1465,15 +1510,28 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             let base_offset = self.cluster_offset(cluster)?;
             for slot in 0..entries_per_cluster {
                 let slot_offset = base_offset + (slot * DIRENT_SIZE) as u64;
-                let entry = self.read_dirent_at(slot_offset)?;
+                let mut entry = self.read_dirent_at(slot_offset)?;
 
                 if entry.is_end() {
                     return Err(FatxError::FileNotFound(name.to_string()));
                 }
                 if !entry.is_deleted() && entry.filename().eq_ignore_ascii_case(name) {
-                    // File size is at offset 48 within the 64-byte directory entry
-                    let size_bytes = self.write_u32_bytes(new_size);
-                    self.write_at(slot_offset + 48, &size_bytes)?;
+                    entry.file_size = new_size;
+                    if let Some(now) = touch {
+                        let date = DirectoryEntry::encode_date(
+                            now.year() as u16,
+                            now.month() as u8,
+                            now.day(),
+                        );
+                        let time =
+                            DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
+                        entry.write_date = date;
+                        entry.write_time = time;
+                        entry.access_date = date;
+                        entry.access_time = time;
+                    }
+                    let raw = self.serialize_dirent(&entry);
+                    self.write_at(slot_offset, &raw)?;
                     return Ok(());
                 }
             }
@@ -1642,14 +1700,54 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
     /// Recursively copy a local directory tree into the FATX volume.
     /// Opens volume once and writes all files/dirs in a single session.
-    #[allow(clippy::type_complexity)]
     pub fn copy_from_host(
         &mut self,
         local_path: &std::path::Path,
         dest_path: &str,
-        progress: Option<&dyn Fn(&str, u64, u64)>,
+        progress: Option<ProgressFn<'_>>,
     ) -> Result<(usize, usize, u64)> {
-        self.copy_from_host_inner(local_path, dest_path, progress, 0)
+        self.copy_from_host_with_control(local_path, dest_path, progress, None, 0, 0)
+    }
+
+    pub fn copy_from_host_with_control(
+        &mut self,
+        local_path: &std::path::Path,
+        dest_path: &str,
+        progress: Option<ProgressFn<'_>>,
+        should_abort: Option<&dyn Fn() -> bool>,
+        flush_every_files: usize,
+        flush_every_bytes: u64,
+    ) -> Result<(usize, usize, u64)> {
+        // A trailing slash means "--to is the parent"; without it, the caller
+        // is naming the target directory itself and we preserve the old behavior.
+        let effective_dest = if dest_path.ends_with('/') {
+            let dir_name = local_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    FatxError::Io(std::io::Error::other(format!(
+                        "Cannot derive source directory name from '{}'",
+                        local_path.display()
+                    )))
+                })?;
+            let trimmed = dest_path.trim_end_matches('/');
+            if trimmed.is_empty() {
+                format!("/{}", dir_name)
+            } else {
+                format!("{}/{}", trimmed, dir_name)
+            }
+        } else {
+            dest_path.to_string()
+        };
+        let mut state = CopyFromHostState {
+            progress,
+            should_abort,
+            flush_every_files,
+            flush_every_bytes,
+            files_since_flush: 0,
+            bytes_since_flush: 0,
+        };
+        self.copy_from_host_inner(local_path, &effective_dest, &mut state, 0)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1657,10 +1755,18 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         &mut self,
         local_path: &std::path::Path,
         dest_path: &str,
-        progress: Option<&dyn Fn(&str, u64, u64)>,
+        state: &mut CopyFromHostState<'_>,
         base_bytes: u64,
     ) -> Result<(usize, usize, u64)> {
         use std::fs;
+
+        let dest_path = if dest_path == "/" {
+            dest_path
+        } else {
+            dest_path.trim_end_matches('/')
+        };
+
+        self.abort_copy_if_requested(state)?;
 
         let mut file_count = 0usize;
         let mut dir_count = 0usize;
@@ -1669,7 +1775,14 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         // Create destination directory
         match self.create_directory(dest_path) {
             Ok(_) => {}
-            Err(FatxError::FileExists(_)) => {} // already exists, fine
+            Err(FatxError::FileExists(_)) => {
+                // `create_directory` reports FileExists for both files and
+                // directories, so verify the existing target is usable.
+                let existing = self.resolve_path(dest_path)?;
+                if !existing.is_directory() {
+                    return Err(FatxError::NotADirectory(dest_path.to_string()));
+                }
+            }
             Err(e) => return Err(e),
         }
         dir_count += 1;
@@ -1684,6 +1797,8 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         })?;
 
         for entry in entries {
+            self.abort_copy_if_requested(state)?;
+
             let entry = entry.map_err(|e| FatxError::Io(std::io::Error::other(e.to_string())))?;
             let local_child = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -1704,7 +1819,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 let (fc, dc, tb) = self.copy_from_host_inner(
                     &local_child,
                     &fatx_child,
-                    progress,
+                    state,
                     base_bytes + total_bytes,
                 )?;
                 file_count += fc;
@@ -1720,17 +1835,48 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 })?;
                 let file_size = data.len() as u64;
 
-                if let Some(cb) = &progress {
+                if let Some(cb) = &state.progress {
                     cb(&fatx_child, file_size, base_bytes + total_bytes);
                 }
 
                 self.create_file(&fatx_child, &data)?;
                 file_count += 1;
                 total_bytes += file_size;
+                state.files_since_flush += 1;
+                state.bytes_since_flush += file_size;
+                self.flush_copy_if_needed(state)?;
             }
         }
 
         Ok((file_count, dir_count, total_bytes))
+    }
+
+    fn abort_copy_if_requested(&mut self, state: &CopyFromHostState<'_>) -> Result<()> {
+        if state
+            .should_abort
+            .is_some_and(|should_abort| should_abort())
+        {
+            self.flush()?;
+            return Err(FatxError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Copy interrupted",
+            )));
+        }
+        Ok(())
+    }
+
+    fn flush_copy_if_needed(&mut self, state: &mut CopyFromHostState<'_>) -> Result<()> {
+        let flush_due_to_files =
+            state.flush_every_files > 0 && state.files_since_flush >= state.flush_every_files;
+        let flush_due_to_bytes =
+            state.flush_every_bytes > 0 && state.bytes_since_flush >= state.flush_every_bytes;
+
+        if flush_due_to_files || flush_due_to_bytes {
+            self.flush()?;
+            state.files_since_flush = 0;
+            state.bytes_since_flush = 0;
+        }
+        Ok(())
     }
 
     /// Find and mark a directory entry as deleted (set filename_len to 0xE5).
