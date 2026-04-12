@@ -5,8 +5,53 @@
 
 mod common;
 
+use std::cell::RefCell;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::rc::Rc;
+use std::thread::sleep;
+use std::time::Duration;
+
+use fatxlib::error::FatxError;
 use fatxlib::types::*;
 use fatxlib::volume::FatxVolume;
+
+#[derive(Default)]
+struct FailingWriteState {
+    fail_on_write: Option<usize>,
+    writes_seen: usize,
+}
+
+struct FailingWriteCursor {
+    inner: Cursor<Vec<u8>>,
+    state: Rc<RefCell<FailingWriteState>>,
+}
+
+impl Read for FailingWriteCursor {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for FailingWriteCursor {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+impl Write for FailingWriteCursor {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut state = self.state.borrow_mut();
+        state.writes_seen += 1;
+        if state.fail_on_write == Some(state.writes_seen) {
+            return Err(std::io::Error::other("injected write failure"));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 // ===========================================================================
 // Volume open / basics
@@ -802,6 +847,65 @@ fn test_write_in_place_updates_dirent_size() {
     assert_eq!(entry.file_size, 200);
 }
 
+#[test]
+fn test_write_in_place_refreshes_write_and_access_timestamps() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    vol.create_file("/timestamps.bin", &[0xAA; 128])
+        .expect("create");
+    let before = vol.resolve_path("/timestamps.bin").expect("resolve before");
+
+    // FAT timestamps are stored with 2-second granularity.
+    sleep(Duration::from_secs(2));
+
+    vol.write_file_in_place("/timestamps.bin", &[0xBB; 128])
+        .expect("overwrite");
+
+    let after = vol.resolve_path("/timestamps.bin").expect("resolve after");
+    assert_eq!(
+        after.creation_date, before.creation_date,
+        "overwrite should preserve creation date"
+    );
+    assert_eq!(
+        after.creation_time, before.creation_time,
+        "overwrite should preserve creation time"
+    );
+    assert_ne!(
+        (after.write_date, after.write_time),
+        (before.write_date, before.write_time),
+        "overwrite should refresh write timestamp"
+    );
+    assert_ne!(
+        (after.access_date, after.access_time),
+        (before.access_date, before.access_time),
+        "overwrite should refresh access timestamp"
+    );
+}
+
+#[test]
+fn test_create_or_replace_file_refreshes_timestamps() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    vol.create_file("/replace.bin", b"first").expect("create");
+    let before = vol.resolve_path("/replace.bin").expect("resolve before");
+
+    sleep(Duration::from_secs(2));
+
+    vol.create_or_replace_file("/replace.bin", b"second")
+        .expect("replace");
+
+    let after = vol.resolve_path("/replace.bin").expect("resolve after");
+    let data = vol.read_file_by_path("/replace.bin").expect("read");
+    assert_eq!(data, b"second");
+    assert_eq!(after.creation_date, before.creation_date);
+    assert_eq!(after.creation_time, before.creation_time);
+    assert_ne!(
+        (after.write_date, after.write_time),
+        (before.write_date, before.write_time),
+        "replace helper should refresh write timestamp"
+    );
+}
+
 /// Multiple in-place writes simulate the NFS flush cycle:
 /// write, flush, write more, flush again.
 #[test]
@@ -850,4 +954,226 @@ fn test_write_in_place_nonexistent_fails() {
 
     let result = vol.write_file_in_place("/nope.bin", &[0xFF; 100]);
     assert!(result.is_err());
+}
+
+// ===========================================================================
+// copy_from_host bugs
+// ===========================================================================
+
+/// Trailing slash means "treat --to as the parent and append the source dir name".
+#[test]
+fn test_copy_from_host_trailing_slash_appends_dir_name() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    let local_tmp = tempfile::TempDir::new().unwrap();
+    let src = local_tmp.path().join("ABCDEFG");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("file1.bin"), b"hello").unwrap();
+
+    vol.create_directory("/dest").expect("mkdir dest");
+    vol.copy_from_host(&src, "/dest/", None).expect("copy");
+
+    let dest_cluster = vol.resolve_path("/dest").unwrap().first_cluster;
+    let dest_entries = vol.read_directory(dest_cluster).unwrap();
+    let names: Vec<String> = dest_entries.iter().map(|e| e.filename()).collect();
+
+    assert!(
+        names.contains(&"ABCDEFG".to_string()),
+        "trailing slash should append source dir name. Got: {:?}",
+        names
+    );
+    let nested = vol.resolve_path("/dest/ABCDEFG/file1.bin");
+    assert!(
+        nested.is_ok(),
+        "nested file should exist under appended dir"
+    );
+}
+
+/// Root destinations should stay rooted when the trailing-slash convention
+/// appends the source directory name.
+#[test]
+fn test_copy_from_host_trailing_slash_root() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    let local_tmp = tempfile::TempDir::new().unwrap();
+    let src = local_tmp.path().join("rootsrc");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("test.txt"), b"data").unwrap();
+
+    vol.copy_from_host(&src, "/", None).expect("copy");
+    let result = vol.resolve_path("/rootsrc/test.txt");
+    assert!(
+        result.is_ok(),
+        "root trailing slash should create /rootsrc/test.txt. Got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_create_file_rejects_duplicate_name() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    vol.create_file("/dup.bin", b"first").expect("create first");
+    let result = vol.create_file("/dup.bin", b"second");
+    assert!(matches!(result, Err(FatxError::FileExists(ref path)) if path == "/dup.bin"));
+
+    let entries = vol.read_directory(FIRST_CLUSTER).unwrap();
+    let dup_count = entries.iter().filter(|e| e.filename() == "dup.bin").count();
+    assert_eq!(
+        dup_count, 1,
+        "duplicate create should not add a second entry"
+    );
+
+    let data = vol.read_file_by_path("/dup.bin").unwrap();
+    assert_eq!(data, b"first", "original file should be preserved");
+}
+
+#[test]
+fn test_copy_from_host_recopy_fails_on_duplicate() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    let local_tmp = tempfile::TempDir::new().unwrap();
+    let src = local_tmp.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("file.bin"), b"original").unwrap();
+
+    vol.copy_from_host(&src, "/dest", None).expect("first copy");
+    let result = vol.copy_from_host(&src, "/dest", None);
+    assert!(
+        matches!(result, Err(FatxError::FileExists(ref path)) if path == "/dest/file.bin"),
+        "second copy should fail on the existing child file, got: {:?}",
+        result
+    );
+
+    let dest = vol.resolve_path("/dest").unwrap();
+    let entries = vol.read_directory(dest.first_cluster).unwrap();
+    let file_count = entries
+        .iter()
+        .filter(|e| e.filename() == "file.bin")
+        .count();
+    assert_eq!(
+        file_count, 1,
+        "re-copy should not create duplicate directory entries"
+    );
+}
+
+#[test]
+fn test_copy_from_host_no_slash_copies_contents_into_target_dir() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    let local_tmp = tempfile::TempDir::new().unwrap();
+    let src = local_tmp.path().join("ABCDEFG");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("file.bin"), b"payload").unwrap();
+
+    vol.create_directory("/dest").expect("mkdir dest");
+    vol.copy_from_host(&src, "/dest/ABCDEFG", None)
+        .expect("copy");
+
+    assert!(vol.resolve_path("/dest/ABCDEFG/file.bin").is_ok());
+}
+
+#[test]
+fn test_create_file_rejects_name_matching_directory() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    vol.create_directory("/stuff").expect("mkdir");
+    let result = vol.create_file("/stuff", b"oops");
+    assert!(
+        matches!(result, Err(FatxError::FileExists(ref path)) if path == "/stuff"),
+        "create_file should reject a name that already belongs to a directory"
+    );
+
+    let entries = vol.read_directory(FIRST_CLUSTER).unwrap();
+    let stuff_entries: Vec<_> = entries.iter().filter(|e| e.filename() == "stuff").collect();
+    assert_eq!(
+        stuff_entries.len(),
+        1,
+        "directory entry should remain unique after failed create"
+    );
+    assert!(stuff_entries[0].is_directory());
+}
+
+#[test]
+fn test_create_file_frees_allocated_clusters_on_dirent_write_failure() {
+    let (tmp, vol) = common::create_fatx_image(4);
+    let img_path = common::image_path(&tmp);
+    drop(vol);
+
+    let image_bytes = std::fs::read(&img_path).expect("read image bytes");
+    let state = Rc::new(RefCell::new(FailingWriteState::default()));
+    let cursor = FailingWriteCursor {
+        inner: Cursor::new(image_bytes),
+        state: Rc::clone(&state),
+    };
+    let mut vol = FatxVolume::open(cursor, 0, 0).expect("open with failing cursor");
+
+    let stats_before = vol.stats().expect("stats before");
+    state.borrow_mut().fail_on_write = Some(2);
+
+    let result = vol.create_file("/leak.bin", b"abc");
+    assert!(
+        result.is_err(),
+        "injected write failure should abort create"
+    );
+
+    let stats_after = vol.stats().expect("stats after");
+    assert_eq!(
+        stats_after.free_clusters, stats_before.free_clusters,
+        "failed create should free the allocated chain"
+    );
+    assert!(
+        matches!(
+            vol.resolve_path("/leak.bin"),
+            Err(FatxError::FileNotFound(_))
+        ),
+        "failed create should not leave a reachable directory entry"
+    );
+}
+
+#[test]
+fn test_copy_from_host_stale_file_blocks_directory() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    let local_tmp = tempfile::TempDir::new().unwrap();
+    let src = local_tmp.path().join("ABCDEFG");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("file1.bin"), b"hello").unwrap();
+
+    vol.create_directory("/dest").expect("mkdir dest");
+    vol.create_file("/dest/ABCDEFG", b"stale data")
+        .expect("create stale file");
+
+    let result = vol.copy_from_host(&src, "/dest/ABCDEFG", None);
+    assert!(
+        matches!(result, Err(FatxError::NotADirectory(ref path)) if path == "/dest/ABCDEFG"),
+        "stale file should be rejected as not-a-directory, got: {:?}",
+        result
+    );
+
+    let dest_cluster = vol.resolve_path("/dest").unwrap().first_cluster;
+    let entries = vol.read_directory(dest_cluster).unwrap();
+    let abcdefg: Vec<_> = entries
+        .iter()
+        .filter(|e| e.filename() == "ABCDEFG")
+        .collect();
+    assert_eq!(abcdefg.len(), 1, "only one ABCDEFG entry");
+    assert!(
+        !abcdefg[0].is_directory(),
+        "stale blocking entry should remain a file"
+    );
+}
+
+#[test]
+fn test_create_file_after_delete_reuses_name() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    vol.create_file("/reuse.bin", b"first")
+        .expect("create first");
+    vol.delete("/reuse.bin").expect("delete");
+    vol.create_file("/reuse.bin", b"second")
+        .expect("create second");
+
+    let data = vol.read_file_by_path("/reuse.bin").expect("read");
+    assert_eq!(data, b"second");
 }
