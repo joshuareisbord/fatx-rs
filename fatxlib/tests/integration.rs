@@ -851,3 +851,104 @@ fn test_write_in_place_nonexistent_fails() {
     let result = vol.write_file_in_place("/nope.bin", &[0xFF; 100]);
     assert!(result.is_err());
 }
+
+// ===========================================================================
+// macOS metadata filtering
+// ===========================================================================
+
+/// copy_from_host should skip macOS metadata files (.DS_Store, ._ prefixed, etc.)
+#[test]
+fn test_copy_from_host_skips_macos_metadata() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    let local_tmp = tempfile::TempDir::new().unwrap();
+    let src = local_tmp.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("game.bin"), b"real file").unwrap();
+    std::fs::write(src.join(".DS_Store"), b"macos junk").unwrap();
+    std::fs::write(src.join("._game.bin"), b"resource fork").unwrap();
+    std::fs::create_dir(src.join(".Spotlight-V100")).unwrap();
+    std::fs::write(src.join(".Spotlight-V100").join("index"), b"idx").unwrap();
+    std::fs::create_dir(src.join(".Trashes")).unwrap();
+    std::fs::create_dir(src.join(".fseventsd")).unwrap();
+
+    vol.copy_from_host(&src, "/dest", None).expect("copy");
+
+    // Only game.bin should exist on the volume
+    let dest = vol.resolve_path("/dest").unwrap();
+    let entries = vol.read_directory(dest.first_cluster).unwrap();
+    let names: Vec<String> = entries.iter().map(|e| e.filename()).collect();
+
+    assert_eq!(
+        names,
+        vec!["game.bin"],
+        "only real files should be copied, got: {:?}",
+        names
+    );
+}
+
+/// is_macos_metadata should match the expected patterns.
+#[test]
+fn test_is_macos_metadata() {
+    use fatxlib::types::is_macos_metadata;
+
+    assert!(is_macos_metadata(".DS_Store"));
+    assert!(is_macos_metadata(".Spotlight-V100"));
+    assert!(is_macos_metadata(".Trashes"));
+    assert!(is_macos_metadata(".fseventsd"));
+    assert!(is_macos_metadata("._anything"));
+    assert!(is_macos_metadata("._Icon\r"));
+    assert!(is_macos_metadata("._"));
+
+    assert!(!is_macos_metadata("game.bin"));
+    assert!(!is_macos_metadata("Content"));
+    assert!(!is_macos_metadata(".hidden"));
+    assert!(!is_macos_metadata("DS_Store")); // no leading dot
+}
+
+/// scan_macos_metadata finds macOS files; delete_macos_metadata removes them.
+#[test]
+fn test_scan_and_delete_macos_metadata() {
+    let (_tmp, mut vol) = common::create_fatx_image(4);
+
+    // Create a mix of real files and macOS junk
+    vol.create_directory("/Content").expect("mkdir");
+    vol.create_file("/Content/game.bin", b"real data")
+        .expect("create game");
+    vol.create_file("/Content/.DS_Store", b"junk")
+        .expect("create ds_store");
+    vol.create_file("/Content/._game.bin", b"resource fork")
+        .expect("create resource");
+    vol.create_file("/.DS_Store", b"root junk")
+        .expect("create root ds_store");
+
+    // Scan first — non-destructive
+    let found = vol.scan_macos_metadata().expect("scan");
+    assert_eq!(found.len(), 3, "should find 3 metadata entries");
+    assert!(found.iter().all(|e| !e.is_dir), "all should be files");
+
+    // Everything still exists after scan
+    assert!(vol.resolve_path("/Content/.DS_Store").is_ok());
+
+    // Now delete
+    let (files, dirs, bytes) = vol.delete_macos_metadata(&found, None).expect("delete");
+    assert_eq!(files, 3);
+    assert_eq!(dirs, 0);
+    assert!(bytes > 0);
+
+    // Real files survive
+    assert!(vol.resolve_path("/Content/game.bin").is_ok());
+    // Junk is gone
+    assert!(vol.resolve_path("/Content/.DS_Store").is_err());
+    assert!(vol.resolve_path("/Content/._game.bin").is_err());
+    assert!(vol.resolve_path("/.DS_Store").is_err());
+}
+
+/// scan_macos_metadata returns empty when no metadata exists.
+#[test]
+fn test_scan_macos_metadata_empty_volume() {
+    let (_tmp, mut vol) = common::create_fatx_image(2);
+    vol.create_file("/game.bin", b"data").expect("create");
+    let found = vol.scan_macos_metadata().expect("scan");
+    assert!(found.is_empty());
+}
