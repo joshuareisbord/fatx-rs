@@ -1557,24 +1557,25 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
     /// Returns a list of matching entries.
     pub fn scan_macos_metadata(&mut self) -> Result<Vec<MacosMetadataEntry>> {
         let mut found = Vec::new();
-        self.scan_macos_metadata_inner("/", &mut found)?;
+        self.scan_macos_metadata_inner("/", FIRST_CLUSTER, &mut found)?;
         Ok(found)
     }
 
     fn scan_macos_metadata_inner(
         &mut self,
         dir_path: &str,
+        dir_cluster: u32,
         found: &mut Vec<MacosMetadataEntry>,
     ) -> Result<()> {
-        let dir_entry = self.resolve_path(dir_path)?;
-        let entries = self.read_directory(dir_entry.first_cluster)?;
+        let entries = self.read_directory(dir_cluster)?;
 
-        let children: Vec<(String, bool, u32)> = entries
+        // Collect to avoid borrow conflict with recursive &mut self calls
+        let children: Vec<(String, bool, u32, u32)> = entries
             .iter()
-            .map(|e| (e.filename(), e.is_directory(), e.file_size))
+            .map(|e| (e.filename(), e.is_directory(), e.first_cluster, e.file_size))
             .collect();
 
-        for (name, is_dir, file_size) in children {
+        for (name, is_dir, first_cluster, file_size) in children {
             let child_path = if dir_path == "/" {
                 format!("/{}", name)
             } else {
@@ -1589,7 +1590,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 });
                 // Don't recurse into metadata dirs — they'll be deleted whole
             } else if is_dir {
-                self.scan_macos_metadata_inner(&child_path, found)?;
+                self.scan_macos_metadata_inner(&child_path, first_cluster, found)?;
             }
         }
 
