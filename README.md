@@ -22,7 +22,7 @@ Both FAT16 and FAT32 entry sizes are handled automatically based on partition si
 - Recursive directory copy with automatic macOS metadata filtering
 - Automatic partition detection at standard Xbox and Xbox 360 offsets
 - Interactive guided mode when run with no arguments
-- TUI file browser for navigating volumes visually
+- TUI file browser for navigating, uploading, downloading, and cleaning up volumes
 - JSON output mode (`--json`) for scripting and automation
 - macOS metadata cleanup command (scan + delete `.DS_Store`, `._*`, etc.)
 
@@ -176,10 +176,14 @@ sudo fatx info /dev/rdisk4 --partition "360 Data" --json
 ### TUI File Browser
 
 ```bash
+# Guided mode — detects disks and partitions automatically
+sudo fatx browse
+
+# Browse a specific partition
 sudo fatx browse /dev/rdisk4 --partition "360 Data"
 ```
 
-Interactive terminal UI for navigating, downloading, and uploading files.
+Interactive terminal UI for navigating, downloading, uploading, and cleaning up files. Press `c` to scan and remove macOS metadata from the current directory.
 
 ### Mount in Finder
 

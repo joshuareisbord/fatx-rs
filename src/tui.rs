@@ -14,6 +14,7 @@
 //!   D          Delete selected file/directory
 //!   r          Rename selected file/directory
 //!   i          Show volume info
+//!   c          Clean up macOS metadata from current directory
 //!   Esc        Cancel running operation / Quit
 //!   q          Quit
 
