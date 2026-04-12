@@ -257,6 +257,50 @@ fn test_cli_write_and_read_roundtrip() {
 }
 
 #[test]
+fn test_cli_write_existing_file_fails() {
+    let (_tmp, img) = create_test_image(4, false);
+
+    let input_dir = TempDir::new().unwrap();
+    let input_file = input_dir.path().join("hello.txt");
+    std::fs::write(&input_file, b"first").unwrap();
+
+    let first = fatx_bin()
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/hello.txt",
+            "--input",
+            input_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run first fatx write");
+    assert!(first.status.success());
+
+    std::fs::write(&input_file, b"second").unwrap();
+    let second = fatx_bin()
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/hello.txt",
+            "--input",
+            input_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run second fatx write");
+
+    assert!(
+        !second.status.success(),
+        "second write should fail when the destination already exists"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already exists"),
+        "existing-file failure should be surfaced to the user, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_cli_write_large_file() {
     let (_tmp, img) = create_test_image(16, false);
 
