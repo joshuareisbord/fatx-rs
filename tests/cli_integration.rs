@@ -775,12 +775,24 @@ fn test_cli_cleanup_dry_run_finds_ds_store() {
     std::fs::write(&real_file, b"real data").unwrap();
 
     fatx_bin()
-        .args(["write", img.to_str().unwrap(), "/.DS_Store", "--input", ds_store.to_str().unwrap()])
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/.DS_Store",
+            "--input",
+            ds_store.to_str().unwrap(),
+        ])
         .output()
         .expect("write .DS_Store");
 
     fatx_bin()
-        .args(["write", img.to_str().unwrap(), "/game.bin", "--input", real_file.to_str().unwrap()])
+        .args([
+            "write",
+            img.to_str().unwrap(),
+            "/game.bin",
+            "--input",
+            real_file.to_str().unwrap(),
+        ])
         .output()
         .expect("write game.bin");
 
@@ -789,15 +801,32 @@ fn test_cli_cleanup_dry_run_finds_ds_store() {
         .output()
         .expect("run fatx cleanup --dry-run");
 
-    assert!(output.status.success(), "cleanup --dry-run failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "cleanup --dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(".DS_Store"), "dry-run should list .DS_Store, got: {}", stdout);
+    assert!(
+        stdout.contains(".DS_Store"),
+        "dry-run should list .DS_Store, got: {}",
+        stdout
+    );
 
     // Verify .DS_Store still exists after dry-run
-    let ls_output = fatx_bin().args(["ls", img.to_str().unwrap(), "/"]).output().expect("ls");
+    let ls_output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/"])
+        .output()
+        .expect("ls");
     let ls_stdout = String::from_utf8_lossy(&ls_output.stdout);
-    assert!(ls_stdout.contains(".DS_Store"), ".DS_Store should still exist after dry-run");
-    assert!(ls_stdout.contains("game.bin"), "game.bin should still exist");
+    assert!(
+        ls_stdout.contains(".DS_Store"),
+        ".DS_Store should still exist after dry-run"
+    );
+    assert!(
+        ls_stdout.contains("game.bin"),
+        "game.bin should still exist"
+    );
 }
 
 #[test]
@@ -815,18 +844,38 @@ fn test_cli_copy_skips_macos_metadata() {
     std::fs::write(src.join(".Spotlight-V100").join("store.db"), b"spotlight").unwrap();
 
     let output = fatx_bin()
-        .args(["copy", img.to_str().unwrap(), "--from", src.to_str().unwrap(), "--to", "/GameDir"])
+        .args([
+            "copy",
+            img.to_str().unwrap(),
+            "--from",
+            src.to_str().unwrap(),
+            "--to",
+            "/GameDir",
+        ])
         .output()
         .expect("run fatx copy");
 
-    assert!(output.status.success(), "copy failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "copy failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let ls_output = fatx_bin().args(["ls", img.to_str().unwrap(), "/GameDir"]).output().expect("ls GameDir");
+    let ls_output = fatx_bin()
+        .args(["ls", img.to_str().unwrap(), "/GameDir"])
+        .output()
+        .expect("ls GameDir");
     assert!(ls_output.status.success());
     let stdout = String::from_utf8_lossy(&ls_output.stdout);
     assert!(stdout.contains("game.bin"), "should have game.bin");
     assert!(stdout.contains("save.dat"), "should have save.dat");
     assert!(!stdout.contains(".DS_Store"), ".DS_Store should be skipped");
-    assert!(!stdout.contains("._game.bin"), "._game.bin should be skipped");
-    assert!(!stdout.contains(".Spotlight"), ".Spotlight-V100 should be skipped");
+    assert!(
+        !stdout.contains("._game.bin"),
+        "._game.bin should be skipped"
+    );
+    assert!(
+        !stdout.contains(".Spotlight"),
+        ".Spotlight-V100 should be skipped"
+    );
 }
