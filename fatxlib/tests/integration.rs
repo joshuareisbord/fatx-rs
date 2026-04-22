@@ -897,7 +897,8 @@ fn test_write_in_place_updates_dirent_size() {
 fn test_read_chain_rejects_out_of_range_next_cluster() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
-    vol.create_file("/corrupt.bin", &[0xAA; 100]).expect("create");
+    vol.create_file("/corrupt.bin", &[0xAA; 100])
+        .expect("create");
     let entry = vol.resolve_path("/corrupt.bin").expect("resolve");
     let invalid_next = FIRST_CLUSTER + vol.total_clusters + 5;
     vol.write_fat_entry(entry.first_cluster, FatEntry::Next(invalid_next))
@@ -915,7 +916,8 @@ fn test_read_chain_rejects_out_of_range_next_cluster() {
 fn test_read_chain_rejects_next_cluster_at_exact_upper_bound() {
     let (_tmp, mut vol) = common::create_fatx_image(4);
 
-    vol.create_file("/boundary.bin", &[0xAB; 100]).expect("create");
+    vol.create_file("/boundary.bin", &[0xAB; 100])
+        .expect("create");
     let entry = vol.resolve_path("/boundary.bin").expect("resolve");
     let invalid_next = FIRST_CLUSTER + vol.total_clusters;
     vol.write_fat_entry(entry.first_cluster, FatEntry::Next(invalid_next))
@@ -1073,7 +1075,11 @@ fn test_begin_write_in_place_partial_extension_write_does_not_publish_size() {
     let session = vol
         .begin_write_in_place_for_entry(FIRST_CLUSTER, first_cluster, cluster_size * 5)
         .expect("begin session");
-    assert_eq!(session.clusters().len(), 5, "grow session should reserve target chain");
+    assert_eq!(
+        session.clusters().len(),
+        5,
+        "grow session should reserve target chain"
+    );
 
     let extension_cluster = session.clusters()[1];
     let extension_payload = vec![0x7A; cluster_size];
@@ -1379,7 +1385,10 @@ fn test_directory_growth_failure_rolls_back_new_parent_cluster() {
         let name = format!("/full/f{:03}.bin", i);
         vol.create_file(&name, &[i as u8]).expect("fill full dir");
     }
-    let parent_cluster = vol.resolve_path("/full").expect("resolve full").first_cluster;
+    let parent_cluster = vol
+        .resolve_path("/full")
+        .expect("resolve full")
+        .first_cluster;
     let parent_chain_before = vol.read_chain(parent_cluster).expect("parent chain before");
     let stats_before = vol.stats().expect("stats before");
     vol.flush().expect("flush populated image");

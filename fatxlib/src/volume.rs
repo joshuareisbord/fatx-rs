@@ -678,7 +678,10 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         }
 
         if chain.len() > self.total_clusters as usize {
-            warn!("Cluster chain exceeded total cluster count from {}", start_cluster);
+            warn!(
+                "Cluster chain exceeded total cluster count from {}",
+                start_cluster
+            );
             return Err(FatxError::CorruptChain(current));
         }
 
@@ -1326,8 +1329,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
             // Use UTC so Xbox displays correct local time
             let now = time::OffsetDateTime::now_utc();
-            let date =
-                DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
+            let date = DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
             let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
 
             let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
@@ -1570,7 +1572,10 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             old_chain
         };
 
-        Ok((old_count, planned_chain.into_iter().take(clusters_needed).collect()))
+        Ok((
+            old_count,
+            planned_chain.into_iter().take(clusters_needed).collect(),
+        ))
     }
 
     fn find_entry_in_parent_by_cluster(

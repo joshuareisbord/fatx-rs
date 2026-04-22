@@ -448,8 +448,7 @@ mod tests {
 
             drop(file);
             let f = File::open(&path).expect("reopen");
-            FatxVolume::open(f, 0, 0)
-                .unwrap_or_else(|_| panic!("valid volume spc={}", spc));
+            FatxVolume::open(f, 0, 0).unwrap_or_else(|_| panic!("valid volume spc={}", spc));
         }
     }
 

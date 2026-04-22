@@ -648,7 +648,10 @@ impl NFSFileSystem for FatxNfs {
                     tokio::task::spawn_blocking(move || {
                         let mut vol = vol.write();
                         vol.read_file(&entry).map_err(|e| {
-                            warn!("seed read for cluster {} failed: {}", entry.first_cluster, e);
+                            warn!(
+                                "seed read for cluster {} failed: {}",
+                                entry.first_cluster, e
+                            );
                             nfsstat3::NFS3ERR_IO
                         })
                     })
@@ -682,7 +685,8 @@ impl NFSFileSystem for FatxNfs {
                     // this prefetched seed is discarded instead of clobbering newer data.
                     let Some(seed) = prefetched_seed.take() else {
                         drop(dirty);
-                        prefetched_seed = self.file_cache.get(&cluster).map(|cached| cached.to_vec());
+                        prefetched_seed =
+                            self.file_cache.get(&cluster).map(|cached| cached.to_vec());
                         if prefetched_seed.is_some() {
                             continue;
                         }
@@ -1600,10 +1604,8 @@ async fn async_main(cli: MountArgs) {
                             // Publish the buffered view once per flush cycle so
                             // reads stay coherent while cluster writes are in
                             // flight after `dirty_files` has been drained.
-                            file_cache.insert(
-                                state.first_cluster,
-                                Bytes::copy_from_slice(&state.data),
-                            );
+                            file_cache
+                                .insert(state.first_cluster, Bytes::copy_from_slice(&state.data));
                         }
                         taken.into_values().collect()
                     };
@@ -2222,12 +2224,10 @@ mod tests {
         let (dir_cluster, file_cluster) = {
             let mut vol = fs.vol.write();
             vol.create_directory("/Dir").expect("mkdir");
-            vol.create_file("/Dir/file.bin", b"old").expect("create file");
+            vol.create_file("/Dir/file.bin", b"old")
+                .expect("create file");
 
-            let dir_cluster = vol
-                .resolve_path("/Dir")
-                .expect("resolve dir")
-                .first_cluster;
+            let dir_cluster = vol.resolve_path("/Dir").expect("resolve dir").first_cluster;
             let file_cluster = vol
                 .resolve_path("/Dir/file.bin")
                 .expect("resolve file")
@@ -2364,7 +2364,8 @@ mod tests {
 
         let mut vol = fs.vol.write();
         assert_eq!(
-            vol.read_file_by_path("/exists.bin").expect("read existing file"),
+            vol.read_file_by_path("/exists.bin")
+                .expect("read existing file"),
             b"original"
         );
     }
@@ -2375,7 +2376,8 @@ mod tests {
 
         let file_id = {
             let mut vol = fs.vol.write();
-            vol.create_file("/seed.bin", b"abcdef").expect("create seed file");
+            vol.create_file("/seed.bin", b"abcdef")
+                .expect("create seed file");
             let entry = vol.resolve_path("/seed.bin").expect("resolve seed file");
             fs.inode_parents
                 .write()
@@ -2400,12 +2402,15 @@ mod tests {
             let mut vol = fs.vol.write();
             vol.create_file("/broken.bin", b"abcdef")
                 .expect("create broken file");
-            let entry = vol.resolve_path("/broken.bin").expect("resolve broken file");
+            let entry = vol
+                .resolve_path("/broken.bin")
+                .expect("resolve broken file");
             vol.write_fat_entry(entry.first_cluster, FatEntry::Free)
                 .expect("corrupt chain");
-            fs.inode_parents
-                .write()
-                .insert(entry.first_cluster, (FIRST_CLUSTER, "broken.bin".to_string()));
+            fs.inode_parents.write().insert(
+                entry.first_cluster,
+                (FIRST_CLUSTER, "broken.bin".to_string()),
+            );
             cluster_to_id(entry.first_cluster)
         };
 
