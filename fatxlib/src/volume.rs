@@ -71,6 +71,33 @@ struct CopyFromHostState<'a> {
     bytes_since_flush: u64,
 }
 
+#[doc(hidden)]
+#[must_use = "WriteSession must be commit()'d or cancel()'d"]
+pub struct WriteSession {
+    path: String,
+    old_count: usize,
+    chain: Vec<u32>,
+    new_size: usize,
+    finalized: bool,
+}
+
+impl WriteSession {
+    pub fn clusters(&self) -> &[u32] {
+        &self.chain
+    }
+}
+
+impl Drop for WriteSession {
+    fn drop(&mut self) {
+        if !self.finalized {
+            warn!(
+                "WriteSession for '{}' dropped without commit/cancel; uncommitted FAT reservations may remain",
+                self.path
+            );
+        }
+    }
+}
+
 impl<T: Read + Write + Seek> FatxVolume<T> {
     /// Open a FATX volume.
     ///
@@ -1299,6 +1326,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         // Read the existing cluster chain
         let old_chain = self.read_chain(target.first_cluster)?;
         let old_count = old_chain.len();
+        let mut chain = old_chain.clone();
 
         // ── Phase 1: Extend chain if file grew ──
         if clusters_needed > old_count {
@@ -1353,11 +1381,12 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 self.write_fat_entry(new_clusters[i], FatEntry::Next(new_clusters[i + 1]))?;
             }
             self.write_fat_entry(*new_clusters.last().unwrap(), FatEntry::EndOfChain)?;
+
+            // Re-read chain after the extension is linked into the FAT cache.
+            chain = self.read_chain(target.first_cluster)?;
         }
 
         // ── Phase 2: Write data to clusters ──
-        // Re-read chain (may have been extended)
-        let chain = self.read_chain(target.first_cluster)?;
         let mut offset = 0;
         for &cluster in chain.iter().take(clusters_needed) {
             let end = (offset + cluster_size).min(data.len());
@@ -1370,7 +1399,14 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             offset += cluster_size;
         }
 
-        // ── Phase 3: Free excess clusters if file shrank ──
+        // ── Phase 3: Publish the new logical file size and timestamps ──
+        //
+        // This happens only after all payload writes completed, so callers never
+        // observe a dirent advertising bytes that haven't been written yet.
+        let now = time::OffsetDateTime::now_utc();
+        self.update_dirent_metadata(parent.first_cluster, filename, data.len() as u32, Some(now))?;
+
+        // ── Phase 4: Free excess clusters if file shrank ──
         if clusters_needed < old_count {
             // Mark the new last cluster as EOC
             self.write_fat_entry(chain[clusters_needed - 1], FatEntry::EndOfChain)?;
@@ -1379,10 +1415,6 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
                 self.write_fat_entry(cluster, FatEntry::Free)?;
             }
         }
-
-        // ── Phase 4: Update directory entry size and modification timestamps ──
-        let now = time::OffsetDateTime::now_utc();
-        self.update_dirent_metadata(parent.first_cluster, filename, data.len() as u32, Some(now))?;
 
         info!(
             "Wrote '{}' in-place ({} bytes, {} clusters, was {})",
@@ -1394,19 +1426,7 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         Ok(())
     }
 
-    /// Prepare a file for in-place writing: extend or shrink the cluster chain
-    /// as needed and update the directory entry size. Returns the cluster chain
-    /// that the caller should write data to (one cluster at a time).
-    ///
-    /// This separates the fast FAT operations (chain management) from the slow
-    /// data writing (USB I/O), allowing callers to release locks between cluster
-    /// writes to avoid blocking other operations.
-    ///
-    /// After calling this, write data to each cluster in the returned chain using
-    /// `write_cluster()`, then call `flush()` to persist FAT changes.
-    pub fn prepare_write_in_place(&mut self, path: &str, new_size: usize) -> Result<Vec<u32>> {
-        let (parent_path, filename) = split_path(path);
-        let parent = self.resolve_path(parent_path)?;
+    fn plan_write_in_place(&mut self, path: &str, new_size: usize) -> Result<(usize, Vec<u32>)> {
         let target = self.resolve_path(path)?;
 
         if target.is_directory() {
@@ -1423,7 +1443,6 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
         let old_chain = self.read_chain(target.first_cluster)?;
         let old_count = old_chain.len();
 
-        // Extend chain if file grew
         if clusters_needed > old_count {
             let extra = clusters_needed - old_count;
             let last_old = *old_chain.last().unwrap();
@@ -1472,24 +1491,79 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             self.write_fat_entry(*new_clusters.last().unwrap(), FatEntry::EndOfChain)?;
         }
 
-        // Get the full chain (may have been extended)
-        let chain = self.read_chain(target.first_cluster)?;
+        let planned_chain = if clusters_needed > old_count {
+            self.read_chain(target.first_cluster)?
+        } else {
+            old_chain
+        };
 
-        // Free excess clusters if file shrank
-        if clusters_needed < old_count {
-            self.write_fat_entry(chain[clusters_needed - 1], FatEntry::EndOfChain)?;
-            for &cluster in chain.iter().take(old_count).skip(clusters_needed) {
+        Ok((old_count, planned_chain.into_iter().take(clusters_needed).collect()))
+    }
+
+    /// Prepare a file for in-place writing and return the target cluster chain
+    /// that the caller should write payload data to.
+    ///
+    /// This method is intentionally non-publishing: it never updates the
+    /// directory entry size or timestamps, and it never truncates/frees the
+    /// tail of a shrinking file. Callers must perform an explicit commit step
+    /// after all payload writes succeed.
+    ///
+    #[doc(hidden)]
+    pub fn prepare_write_in_place(&mut self, path: &str, new_size: usize) -> Result<Vec<u32>> {
+        let (_old_count, chain) = self.plan_write_in_place(path, new_size)?;
+        Ok(chain)
+    }
+
+    #[doc(hidden)]
+    pub fn begin_write_in_place(&mut self, path: &str, new_size: usize) -> Result<WriteSession> {
+        let (old_count, chain) = self.plan_write_in_place(path, new_size)?;
+        Ok(WriteSession {
+            path: path.to_string(),
+            old_count,
+            chain,
+            new_size,
+            finalized: false,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn commit_write_session(&mut self, mut session: WriteSession) -> Result<()> {
+        let (parent_path, filename) = split_path(&session.path);
+        let parent = self.resolve_path(parent_path)?;
+
+        let now = time::OffsetDateTime::now_utc();
+        self.update_dirent_metadata(
+            parent.first_cluster,
+            filename,
+            session.new_size as u32,
+            Some(now),
+        )?;
+
+        if session.chain.len() < session.old_count {
+            let target = self.resolve_path(&session.path)?;
+            let full_chain = self.read_chain(target.first_cluster)?;
+            self.write_fat_entry(full_chain[session.chain.len() - 1], FatEntry::EndOfChain)?;
+            for &cluster in full_chain.iter().skip(session.chain.len()) {
                 self.write_fat_entry(cluster, FatEntry::Free)?;
             }
         }
 
-        // Update directory entry size and write/access timestamps. Callers may
-        // still perform the actual cluster writes later, but this keeps the
-        // overwrite semantics consistent with in-place writes.
-        let now = time::OffsetDateTime::now_utc();
-        self.update_dirent_metadata(parent.first_cluster, filename, new_size as u32, Some(now))?;
+        session.finalized = true;
+        Ok(())
+    }
 
-        Ok(chain.into_iter().take(clusters_needed).collect())
+    #[doc(hidden)]
+    pub fn cancel_write_session(&mut self, mut session: WriteSession) -> Result<()> {
+        if session.chain.len() > session.old_count {
+            let old_last = session.chain[session.old_count - 1];
+            self.write_fat_entry(old_last, FatEntry::EndOfChain)?;
+            for &cluster in session.chain.iter().skip(session.old_count) {
+                self.write_fat_entry(cluster, FatEntry::Free)?;
+            }
+        }
+
+        session.finalized = true;
+        Ok(())
     }
 
     /// Update selected mutable metadata for a directory entry on disk.

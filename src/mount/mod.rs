@@ -1459,11 +1459,11 @@ async fn async_main(cli: MountArgs) {
                             let ft = Instant::now();
                             let data_len = data.len();
 
-                            // Phase 1: Prepare chain (fast FAT ops — brief lock)
-                            let chain = {
+                            // Phase 1: Prepare chain without publishing metadata.
+                            let session = {
                                 let mut vol = vol.write();
-                                match vol.prepare_write_in_place(&path, data.len()) {
-                                    Ok(chain) => chain,
+                                match vol.begin_write_in_place(&path, data.len()) {
+                                    Ok(session) => session,
                                     Err(fatxlib::error::FatxError::FileNotFound(_)) => {
                                         // File doesn't exist — create it (holds lock for full write)
                                         if let Err(e) = vol.create_or_replace_file(&path, &data) {
@@ -1485,7 +1485,8 @@ async fn async_main(cli: MountArgs) {
                                 vol.superblock.cluster_size() as usize
                             };
                             let mut offset = 0usize;
-                            for &c in &chain {
+                            let mut write_failed = false;
+                            for &c in session.clusters() {
                                 let end = (offset + cluster_size).min(data.len());
                                 let mut cluster_buf = vec![0u8; cluster_size];
                                 if offset < data.len() {
@@ -1496,6 +1497,7 @@ async fn async_main(cli: MountArgs) {
                                     let mut vol = vol.write();
                                     if let Err(e) = vol.write_cluster(c, &cluster_buf) {
                                         error!("Flush cluster {} for '{}' failed: {}", c, path, e);
+                                        write_failed = true;
                                         break;
                                     }
                                 }
@@ -1503,6 +1505,20 @@ async fn async_main(cli: MountArgs) {
                                 offset += cluster_size;
                                 if offset >= data.len() {
                                     break;
+                                }
+                            }
+
+                            {
+                                let mut vol = vol.write();
+                                if write_failed {
+                                    if let Err(e) = vol.cancel_write_session(session) {
+                                        error!("Flush cancel '{}' failed: {}", path, e);
+                                    }
+                                    continue;
+                                }
+                                if let Err(e) = vol.commit_write_session(session) {
+                                    error!("Flush commit '{}' failed: {}", path, e);
+                                    continue;
                                 }
                             }
 

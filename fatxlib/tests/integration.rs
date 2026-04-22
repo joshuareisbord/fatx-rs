@@ -956,6 +956,216 @@ fn test_write_in_place_nonexistent_fails() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_prepare_write_in_place_grow_does_not_publish_size_before_commit() {
+    let (tmp, mut vol) = common::create_fatx_image(4);
+
+    let original = vec![0x11; 100];
+    vol.create_file("/prepare-grow.bin", &original)
+        .expect("create");
+
+    let cluster_size = vol.superblock.cluster_size() as usize;
+    let chain = vol
+        .prepare_write_in_place("/prepare-grow.bin", cluster_size * 5)
+        .expect("prepare grow");
+    assert_eq!(chain.len(), 5, "grow prepare should reserve target chain");
+
+    vol.flush().expect("flush");
+    drop(vol);
+
+    let image = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(common::image_path(&tmp))
+        .expect("reopen image");
+    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
+
+    let entry = reopened
+        .resolve_path("/prepare-grow.bin")
+        .expect("resolve after reopen");
+    assert_eq!(
+        entry.file_size,
+        original.len() as u32,
+        "prepare alone must not publish a larger file size"
+    );
+    assert_eq!(
+        reopened
+            .read_file_by_path("/prepare-grow.bin")
+            .expect("read after reopen"),
+        original
+    );
+}
+
+#[test]
+fn test_prepare_write_in_place_shrink_does_not_publish_size_before_commit() {
+    let (tmp, mut vol) = common::create_fatx_image(4);
+
+    let original = vec![0x33; 50_000];
+    vol.create_file("/prepare-shrink.bin", &original)
+        .expect("create");
+
+    let chain = vol
+        .prepare_write_in_place("/prepare-shrink.bin", 100)
+        .expect("prepare shrink");
+    assert_eq!(chain.len(), 1, "shrink prepare should target retained prefix");
+
+    vol.flush().expect("flush");
+    drop(vol);
+
+    let image = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(common::image_path(&tmp))
+        .expect("reopen image");
+    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
+
+    let entry = reopened
+        .resolve_path("/prepare-shrink.bin")
+        .expect("resolve after reopen");
+    assert_eq!(
+        entry.file_size,
+        original.len() as u32,
+        "prepare alone must not publish a smaller file size"
+    );
+    assert_eq!(
+        reopened
+            .read_file_by_path("/prepare-shrink.bin")
+            .expect("read after reopen"),
+        original
+    );
+}
+
+#[test]
+fn test_prepare_write_in_place_does_not_refresh_timestamps_before_commit() {
+    let (tmp, mut vol) = common::create_fatx_image(4);
+
+    vol.create_file("/prepare-time.bin", &[0xAA; 128])
+        .expect("create");
+    let before = vol.resolve_path("/prepare-time.bin").expect("resolve before");
+
+    sleep(Duration::from_secs(2));
+
+    vol.prepare_write_in_place("/prepare-time.bin", 4096)
+        .expect("prepare");
+    vol.flush().expect("flush");
+    drop(vol);
+
+    let image = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(common::image_path(&tmp))
+        .expect("reopen image");
+    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
+    let after = reopened
+        .resolve_path("/prepare-time.bin")
+        .expect("resolve after");
+
+    assert_eq!(
+        (after.write_date, after.write_time),
+        (before.write_date, before.write_time),
+        "prepare alone must not publish a write timestamp"
+    );
+    assert_eq!(
+        (after.access_date, after.access_time),
+        (before.access_date, before.access_time),
+        "prepare alone must not publish an access timestamp"
+    );
+}
+
+#[test]
+fn test_begin_write_in_place_partial_extension_write_does_not_publish_size() {
+    let (tmp, mut vol) = common::create_fatx_image(4);
+
+    let original = vec![0x21; 100];
+    vol.create_file("/session-grow.bin", &original)
+        .expect("create");
+
+    let cluster_size = vol.superblock.cluster_size() as usize;
+    let session = vol
+        .begin_write_in_place("/session-grow.bin", cluster_size * 5)
+        .expect("begin session");
+    assert_eq!(session.clusters().len(), 5, "grow session should reserve target chain");
+
+    let extension_cluster = session.clusters()[1];
+    let extension_payload = vec![0x7A; cluster_size];
+    vol.write_cluster(extension_cluster, &extension_payload)
+        .expect("write extension cluster");
+    vol.flush().expect("flush uncommitted session");
+
+    let image = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(common::image_path(&tmp))
+        .expect("reopen image");
+    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
+
+    let entry = reopened
+        .resolve_path("/session-grow.bin")
+        .expect("resolve after partial write");
+    assert_eq!(
+        entry.file_size,
+        original.len() as u32,
+        "session writes must not publish a larger file size before commit"
+    );
+    assert_eq!(
+        reopened
+            .read_file_by_path("/session-grow.bin")
+            .expect("read after partial write"),
+        original
+    );
+    drop(reopened);
+
+    vol.cancel_write_session(session).expect("cancel session");
+    vol.flush().expect("flush cancel");
+}
+
+#[test]
+fn test_cancel_write_session_releases_extension_and_preserves_visible_file() {
+    let (tmp, mut vol) = common::create_fatx_image(4);
+
+    let original = vec![0x44; 100];
+    vol.create_file("/session-cancel.bin", &original)
+        .expect("create");
+    let before = vol.stats().expect("stats before");
+
+    let cluster_size = vol.superblock.cluster_size() as usize;
+    let session = vol
+        .begin_write_in_place("/session-cancel.bin", cluster_size * 4)
+        .expect("begin session");
+    let extension_cluster = session.clusters()[1];
+    vol.write_cluster(extension_cluster, &vec![0x55; cluster_size])
+        .expect("write extension cluster");
+    vol.flush().expect("flush uncommitted session");
+
+    vol.cancel_write_session(session).expect("cancel session");
+    vol.flush().expect("flush cancel");
+    drop(vol);
+
+    let image = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(common::image_path(&tmp))
+        .expect("reopen image");
+    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
+
+    let entry = reopened
+        .resolve_path("/session-cancel.bin")
+        .expect("resolve after cancel");
+    assert_eq!(entry.file_size, original.len() as u32);
+    assert_eq!(
+        reopened
+            .read_file_by_path("/session-cancel.bin")
+            .expect("read after cancel"),
+        original
+    );
+
+    let after = reopened.stats().expect("stats after");
+    assert_eq!(
+        after.free_clusters, before.free_clusters,
+        "cancelling a grow session should release reserved extension clusters"
+    );
+}
+
 // ===========================================================================
 // copy_from_host bugs
 // ===========================================================================
