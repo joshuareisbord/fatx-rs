@@ -2032,10 +2032,34 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         let (parent_path, old_name) = split_path(old_path);
         let parent = self.resolve_path(parent_path)?;
+        let source = self.resolve_path(old_path)?;
 
         let chain = self.read_chain(parent.first_cluster)?;
         let cluster_size = self.superblock.cluster_size() as usize;
         let entries_per_cluster = cluster_size / DIRENT_SIZE;
+
+        for &cluster in &chain {
+            let base_offset = self.cluster_offset(cluster)?;
+            for slot in 0..entries_per_cluster {
+                let slot_offset = base_offset + (slot * DIRENT_SIZE) as u64;
+                let entry = self.read_dirent_at(slot_offset)?;
+
+                if entry.is_end() {
+                    break;
+                }
+                if !entry.is_deleted()
+                    && entry.first_cluster != source.first_cluster
+                    && entry.filename().eq_ignore_ascii_case(new_name)
+                {
+                    let dest_path = if parent_path == "/" {
+                        format!("/{}", new_name)
+                    } else {
+                        format!("{}/{}", parent_path, new_name)
+                    };
+                    return Err(FatxError::FileExists(dest_path));
+                }
+            }
+        }
 
         for &cluster in &chain {
             let base_offset = self.cluster_offset(cluster)?;

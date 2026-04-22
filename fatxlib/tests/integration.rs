@@ -403,6 +403,52 @@ fn test_rename_preserves_data() {
     assert_eq!(read, original_data);
 }
 
+#[test]
+fn test_rename_rejects_destination_collision() {
+    let (_tmp, mut vol) = common::create_fatx_image(2);
+
+    vol.create_file("/a.txt", b"aaa").expect("create a");
+    vol.create_file("/b.txt", b"bbb").expect("create b");
+
+    let result = vol.rename("/a.txt", "b.txt");
+    assert!(
+        matches!(result, Err(FatxError::FileExists(ref path)) if path == "/b.txt"),
+        "expected destination collision, got {:?}",
+        result
+    );
+
+    assert_eq!(vol.read_file_by_path("/a.txt").expect("read a"), b"aaa");
+    assert_eq!(vol.read_file_by_path("/b.txt").expect("read b"), b"bbb");
+}
+
+#[test]
+fn test_rename_same_name_is_noop() {
+    let (_tmp, mut vol) = common::create_fatx_image(2);
+
+    vol.create_file("/a.txt", b"payload").expect("create");
+    vol.rename("/a.txt", "a.txt").expect("rename noop");
+
+    assert_eq!(
+        vol.read_file_by_path("/a.txt").expect("read after noop"),
+        b"payload"
+    );
+}
+
+#[test]
+fn test_rename_case_only_changes_filename() {
+    let (_tmp, mut vol) = common::create_fatx_image(2);
+
+    vol.create_file("/a.txt", b"payload").expect("create");
+    vol.rename("/a.txt", "A.TXT").expect("rename case-only");
+
+    let entry = vol.resolve_path("/A.TXT").expect("resolve renamed");
+    assert_eq!(entry.filename(), "A.TXT");
+    assert_eq!(
+        vol.read_file_by_path("/A.TXT").expect("read renamed"),
+        b"payload"
+    );
+}
+
 // ===========================================================================
 // Volume stats
 // ===========================================================================
