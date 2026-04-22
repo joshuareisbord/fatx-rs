@@ -1589,25 +1589,6 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
             .ok_or_else(|| FatxError::FileNotFound(format!("cluster {}", first_cluster)))
     }
 
-    fn plan_write_in_place(&mut self, path: &str, new_size: usize) -> Result<(usize, Vec<u32>)> {
-        let target = self.resolve_path(path)?;
-        self.plan_write_in_place_for_entry(&target, new_size)
-    }
-
-    /// Prepare a file for in-place writing and return the target cluster chain
-    /// that the caller should write payload data to.
-    ///
-    /// This method is intentionally non-publishing: it never updates the
-    /// directory entry size or timestamps, and it never truncates/frees the
-    /// tail of a shrinking file. Callers must perform an explicit commit step
-    /// after all payload writes succeed.
-    ///
-    #[doc(hidden)]
-    pub fn prepare_write_in_place(&mut self, path: &str, new_size: usize) -> Result<Vec<u32>> {
-        let (_old_count, chain) = self.plan_write_in_place(path, new_size)?;
-        Ok(chain)
-    }
-
     #[doc(hidden)]
     pub fn begin_write_in_place_for_entry(
         &mut self,

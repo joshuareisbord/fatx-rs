@@ -455,7 +455,7 @@ fn test_rename_case_only_changes_filename() {
 
 #[test]
 fn test_volume_stats() {
-    let (_tmp, mut vol) = common::create_fatx_image(2);
+    let (_tmp, vol) = common::create_fatx_image(2);
 
     let stats = vol.stats().expect("stats");
     assert!(stats.total_clusters > 0);
@@ -1020,7 +1020,7 @@ fn test_write_in_place_repeated_overwrites() {
         let size = (i as usize) * 1000;
         let data = vec![i; size];
         vol.write_file_in_place("/cycle.bin", &data)
-            .expect(&format!("write cycle {}", i));
+            .unwrap_or_else(|_| panic!("write cycle {}", i));
 
         let read_back = vol.read_file_by_path("/cycle.bin").expect("read");
         assert_eq!(read_back.len(), size);
@@ -1055,122 +1055,6 @@ fn test_write_in_place_nonexistent_fails() {
 
     let result = vol.write_file_in_place("/nope.bin", &[0xFF; 100]);
     assert!(result.is_err());
-}
-
-#[test]
-fn test_prepare_write_in_place_grow_does_not_publish_size_before_commit() {
-    let (tmp, mut vol) = common::create_fatx_image(4);
-
-    let original = vec![0x11; 100];
-    vol.create_file("/prepare-grow.bin", &original)
-        .expect("create");
-
-    let cluster_size = vol.superblock.cluster_size() as usize;
-    let chain = vol
-        .prepare_write_in_place("/prepare-grow.bin", cluster_size * 5)
-        .expect("prepare grow");
-    assert_eq!(chain.len(), 5, "grow prepare should reserve target chain");
-
-    vol.flush().expect("flush");
-    drop(vol);
-
-    let image = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(common::image_path(&tmp))
-        .expect("reopen image");
-    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
-
-    let entry = reopened
-        .resolve_path("/prepare-grow.bin")
-        .expect("resolve after reopen");
-    assert_eq!(
-        entry.file_size,
-        original.len() as u32,
-        "prepare alone must not publish a larger file size"
-    );
-    assert_eq!(
-        reopened
-            .read_file_by_path("/prepare-grow.bin")
-            .expect("read after reopen"),
-        original
-    );
-}
-
-#[test]
-fn test_prepare_write_in_place_shrink_does_not_publish_size_before_commit() {
-    let (tmp, mut vol) = common::create_fatx_image(4);
-
-    let original = vec![0x33; 50_000];
-    vol.create_file("/prepare-shrink.bin", &original)
-        .expect("create");
-
-    let chain = vol
-        .prepare_write_in_place("/prepare-shrink.bin", 100)
-        .expect("prepare shrink");
-    assert_eq!(chain.len(), 1, "shrink prepare should target retained prefix");
-
-    vol.flush().expect("flush");
-    drop(vol);
-
-    let image = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(common::image_path(&tmp))
-        .expect("reopen image");
-    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
-
-    let entry = reopened
-        .resolve_path("/prepare-shrink.bin")
-        .expect("resolve after reopen");
-    assert_eq!(
-        entry.file_size,
-        original.len() as u32,
-        "prepare alone must not publish a smaller file size"
-    );
-    assert_eq!(
-        reopened
-            .read_file_by_path("/prepare-shrink.bin")
-            .expect("read after reopen"),
-        original
-    );
-}
-
-#[test]
-fn test_prepare_write_in_place_does_not_refresh_timestamps_before_commit() {
-    let (tmp, mut vol) = common::create_fatx_image(4);
-
-    vol.create_file("/prepare-time.bin", &[0xAA; 128])
-        .expect("create");
-    let before = vol.resolve_path("/prepare-time.bin").expect("resolve before");
-
-    sleep(Duration::from_secs(2));
-
-    vol.prepare_write_in_place("/prepare-time.bin", 4096)
-        .expect("prepare");
-    vol.flush().expect("flush");
-    drop(vol);
-
-    let image = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(common::image_path(&tmp))
-        .expect("reopen image");
-    let mut reopened = FatxVolume::open(image, 0, 0).expect("open volume");
-    let after = reopened
-        .resolve_path("/prepare-time.bin")
-        .expect("resolve after");
-
-    assert_eq!(
-        (after.write_date, after.write_time),
-        (before.write_date, before.write_time),
-        "prepare alone must not publish a write timestamp"
-    );
-    assert_eq!(
-        (after.access_date, after.access_time),
-        (before.access_date, before.access_time),
-        "prepare alone must not publish an access timestamp"
-    );
 }
 
 #[test]

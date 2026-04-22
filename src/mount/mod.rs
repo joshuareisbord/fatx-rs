@@ -662,27 +662,50 @@ impl NFSFileSystem for FatxNfs {
 
         // Buffer the write in memory — NO disk I/O here.
         // The periodic flush task will write dirty files to disk.
-        {
+        let mut prefetched_seed = prefetched_seed;
+        loop {
             let mut dirty = self.dirty_files.lock();
-            let buf = match dirty.entry(cluster) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => entry.insert(DirtyFileState {
-                    parent_cluster,
-                    first_cluster: cluster,
+            match dirty.entry(cluster) {
+                Entry::Occupied(mut entry) => {
+                    let buf = entry.get_mut();
+                    let write_end = offset as usize + data.len();
+                    if write_end > buf.data.len() {
+                        buf.data.resize(write_end, 0);
+                    }
+                    buf.data[offset as usize..write_end].copy_from_slice(data);
+                    break;
+                }
+                Entry::Vacant(entry) => {
                     // We intentionally re-check here after prefetching outside the lock.
                     // Another writer may have inserted the dirty buffer while we were
                     // reading from cache/disk, in which case the Occupied arm wins and
                     // this prefetched seed is discarded instead of clobbering newer data.
-                    data: prefetched_seed
-                        .expect("prefetched seed must exist when inserting dirty buffer"),
-                }),
-            };
+                    let Some(seed) = prefetched_seed.take() else {
+                        drop(dirty);
+                        prefetched_seed = self.file_cache.get(&cluster).map(|cached| cached.to_vec());
+                        if prefetched_seed.is_some() {
+                            continue;
+                        }
+                        warn!(
+                            "seed buffer for cluster {} disappeared before insert; returning I/O error",
+                            cluster
+                        );
+                        return Err(nfsstat3::NFS3ERR_IO);
+                    };
 
-            let write_end = offset as usize + data.len();
-            if write_end > buf.data.len() {
-                buf.data.resize(write_end, 0);
+                    let buf = entry.insert(DirtyFileState {
+                        parent_cluster,
+                        first_cluster: cluster,
+                        data: seed,
+                    });
+                    let write_end = offset as usize + data.len();
+                    if write_end > buf.data.len() {
+                        buf.data.resize(write_end, 0);
+                    }
+                    buf.data[offset as usize..write_end].copy_from_slice(data);
+                    break;
+                }
             }
-            buf.data[offset as usize..write_end].copy_from_slice(data);
         }
 
         self.flush_needed.store(true, Ordering::Relaxed);
@@ -2005,7 +2028,10 @@ async fn async_main(cli: MountArgs) {
                                         );
                                     }
                                 }
-                                Err(fatxlib::error::FatxError::FileNotFound(_)) => {}
+                                Err(fatxlib::error::FatxError::FileNotFound(_)) => eprintln!(
+                                    "[shutdown] Dropping dirty buffer for deleted/missing cluster {}",
+                                    state.first_cluster
+                                ),
                                 Err(e) => eprintln!(
                                     "[shutdown] Failed to prepare dirty file {}: {}",
                                     state.first_cluster, e
