@@ -1153,23 +1153,42 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         // No free slot in existing clusters — allocate a new cluster for the directory
         let new_cluster = self.allocate_cluster()?;
-
-        // Extend the chain: update the last cluster to point to the new one
         let last_cluster = *chain.last().unwrap();
-        self.write_fat_entry(last_cluster, FatEntry::Next(new_cluster))?;
+        let result = (|| -> Result<()> {
+            // Extend the chain: update the last cluster to point to the new one
+            self.write_fat_entry(last_cluster, FatEntry::Next(new_cluster))?;
 
-        // Initialize the new cluster with 0xFF (end markers)
-        let blank = vec![0xFF; cluster_size];
-        self.write_cluster(new_cluster, &blank)?;
+            // Initialize the new cluster with 0xFF (end markers)
+            let blank = vec![0xFF; cluster_size];
+            self.write_cluster(new_cluster, &blank)?;
 
-        // Write the entry at the first slot of the new cluster
-        let base_offset = self.cluster_offset(new_cluster)?;
-        let raw = self.serialize_dirent(entry);
-        self.write_at(base_offset, &raw)?;
+            // Write the entry at the first slot of the new cluster
+            let base_offset = self.cluster_offset(new_cluster)?;
+            let raw = self.serialize_dirent(entry);
+            self.write_at(base_offset, &raw)?;
 
-        // Write end marker at slot 1
-        if entries_per_cluster > 1 {
-            self.write_at(base_offset + DIRENT_SIZE as u64, &[DIRENT_END])?;
+            // Write end marker at slot 1
+            if entries_per_cluster > 1 {
+                self.write_at(base_offset + DIRENT_SIZE as u64, &[DIRENT_END])?;
+            }
+
+            Ok(())
+        })();
+
+        if let Err(err) = result {
+            if let Err(cleanup_err) = self.write_fat_entry(last_cluster, FatEntry::EndOfChain) {
+                warn!(
+                    "add_dirent cleanup restore for parent {} failed after error {}: {}",
+                    parent_cluster, err, cleanup_err
+                );
+            }
+            if let Err(cleanup_err) = self.write_fat_entry(new_cluster, FatEntry::Free) {
+                warn!(
+                    "add_dirent cleanup free for new cluster {} failed after error {}: {}",
+                    new_cluster, err, cleanup_err
+                );
+            }
+            return Err(err);
         }
 
         Ok(())
@@ -1299,36 +1318,50 @@ impl<T: Read + Write + Seek> FatxVolume<T> {
 
         // Allocate one cluster for the new directory
         let cluster = self.allocate_cluster()?;
+        let result = (|| -> Result<()> {
+            // Initialize with end markers
+            let cluster_size = self.superblock.cluster_size() as usize;
+            let blank = vec![0xFFu8; cluster_size];
+            self.write_cluster(cluster, &blank)?;
 
-        // Initialize with end markers
-        let cluster_size = self.superblock.cluster_size() as usize;
-        let blank = vec![0xFFu8; cluster_size];
-        self.write_cluster(cluster, &blank)?;
+            // Use UTC so Xbox displays correct local time
+            let now = time::OffsetDateTime::now_utc();
+            let date =
+                DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
+            let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
 
-        // Use UTC so Xbox displays correct local time
-        let now = time::OffsetDateTime::now_utc();
-        let date = DirectoryEntry::encode_date(now.year() as u16, now.month() as u8, now.day());
-        let time = DirectoryEntry::encode_time(now.hour(), now.minute(), now.second());
+            let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
+            let name_bytes = dirname.as_bytes();
+            filename_raw[..name_bytes.len()].copy_from_slice(name_bytes);
 
-        let mut filename_raw = [0xFFu8; MAX_FILENAME_LEN];
-        let name_bytes = dirname.as_bytes();
-        filename_raw[..name_bytes.len()].copy_from_slice(name_bytes);
+            let entry = DirectoryEntry {
+                filename_len: name_bytes.len() as u8,
+                attributes: FileAttributes::DIRECTORY,
+                filename_raw,
+                first_cluster: cluster,
+                file_size: 0,
+                creation_time: time,
+                creation_date: date,
+                write_time: time,
+                write_date: date,
+                access_time: time,
+                access_date: date,
+            };
 
-        let entry = DirectoryEntry {
-            filename_len: name_bytes.len() as u8,
-            attributes: FileAttributes::DIRECTORY,
-            filename_raw,
-            first_cluster: cluster,
-            file_size: 0,
-            creation_time: time,
-            creation_date: date,
-            write_time: time,
-            write_date: date,
-            access_time: time,
-            access_date: date,
-        };
+            self.add_dirent_to_directory(parent.first_cluster, &entry)?;
+            Ok(())
+        })();
 
-        self.add_dirent_to_directory(parent.first_cluster, &entry)?;
+        if let Err(err) = result {
+            if let Err(cleanup_err) = self.write_fat_entry(cluster, FatEntry::Free) {
+                warn!(
+                    "create_directory cleanup for '{}' failed after error {}: {}",
+                    path, err, cleanup_err
+                );
+            }
+            return Err(err);
+        }
+
         info!("Created directory '{}'", dirname);
         Ok(())
     }

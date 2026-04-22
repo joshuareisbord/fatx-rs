@@ -1420,6 +1420,8 @@ fn test_create_file_frees_allocated_clusters_on_dirent_write_failure() {
     let mut vol = FatxVolume::open(cursor, 0, 0).expect("open with failing cursor");
 
     let stats_before = vol.stats().expect("stats before");
+    // write #1 initializes the new directory cluster; write #2 persists the
+    // parent directory entry, which is the rollback edge we want here.
     state.borrow_mut().fail_on_write = Some(2);
 
     let result = vol.create_file("/leak.bin", b"abc");
@@ -1436,6 +1438,91 @@ fn test_create_file_frees_allocated_clusters_on_dirent_write_failure() {
     assert!(
         matches!(
             vol.resolve_path("/leak.bin"),
+            Err(FatxError::FileNotFound(_))
+        ),
+        "failed create should not leave a reachable directory entry"
+    );
+}
+
+#[test]
+fn test_create_directory_frees_allocated_cluster_on_dirent_write_failure() {
+    let (tmp, vol) = common::create_fatx_image(4);
+    let img_path = common::image_path(&tmp);
+    drop(vol);
+
+    let image_bytes = std::fs::read(&img_path).expect("read image bytes");
+    let state = Rc::new(RefCell::new(FailingWriteState::default()));
+    let cursor = FailingWriteCursor {
+        inner: Cursor::new(image_bytes),
+        state: Rc::clone(&state),
+    };
+    let mut vol = FatxVolume::open(cursor, 0, 0).expect("open with failing cursor");
+
+    let stats_before = vol.stats().expect("stats before");
+    state.borrow_mut().fail_on_write = Some(2);
+
+    let result = vol.create_directory("/broken");
+    assert!(
+        result.is_err(),
+        "injected write failure should abort directory create"
+    );
+
+    let stats_after = vol.stats().expect("stats after");
+    assert_eq!(
+        stats_after.free_clusters, stats_before.free_clusters,
+        "failed mkdir should free the allocated directory cluster"
+    );
+    assert!(
+        matches!(vol.resolve_path("/broken"), Err(FatxError::FileNotFound(_))),
+        "failed mkdir should not leave a reachable directory entry"
+    );
+}
+
+#[test]
+fn test_directory_growth_failure_rolls_back_new_parent_cluster() {
+    let (tmp, mut vol) = common::create_fatx_image(8);
+
+    vol.create_directory("/full").expect("mkdir");
+    for i in 0..256 {
+        let name = format!("/full/f{:03}.bin", i);
+        vol.create_file(&name, &[i as u8]).expect("fill full dir");
+    }
+    let parent_cluster = vol.resolve_path("/full").expect("resolve full").first_cluster;
+    let parent_chain_before = vol.read_chain(parent_cluster).expect("parent chain before");
+    let stats_before = vol.stats().expect("stats before");
+    vol.flush().expect("flush populated image");
+
+    let img_path = common::image_path(&tmp);
+    drop(vol);
+
+    let image_bytes = std::fs::read(&img_path).expect("read image bytes");
+    let state = Rc::new(RefCell::new(FailingWriteState::default()));
+    let cursor = FailingWriteCursor {
+        inner: Cursor::new(image_bytes),
+        state: Rc::clone(&state),
+    };
+    let mut vol = FatxVolume::open(cursor, 0, 0).expect("open with failing cursor");
+    state.borrow_mut().fail_on_write = Some(2);
+
+    let result = vol.create_file("/full/overflow.bin", b"x");
+    assert!(
+        result.is_err(),
+        "injected write failure should abort create in expanded dir"
+    );
+
+    let stats_after = vol.stats().expect("stats after");
+    assert_eq!(
+        stats_after.free_clusters, stats_before.free_clusters,
+        "failed directory expansion should free both file data and parent dir clusters"
+    );
+    assert_eq!(
+        vol.read_chain(parent_cluster).expect("parent chain after"),
+        parent_chain_before,
+        "failed directory expansion should restore the parent directory chain"
+    );
+    assert!(
+        matches!(
+            vol.resolve_path("/full/overflow.bin"),
             Err(FatxError::FileNotFound(_))
         ),
         "failed create should not leave a reachable directory entry"
