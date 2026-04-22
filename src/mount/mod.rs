@@ -728,8 +728,53 @@ impl NFSFileSystem for FatxNfs {
         dirid: fileid3,
         filename: &filename3,
     ) -> Result<fileid3, nfsstat3> {
-        let (id, _) = self.create(dirid, filename, sattr3::default()).await?;
-        Ok(id)
+        let t0 = Instant::now();
+        self.check_writable()?;
+
+        let name_str =
+            std::str::from_utf8(filename.as_ref()).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
+        info!("NFS create exclusive: dir={} name=\"{}\"", dirid, name_str);
+
+        let path = self.resolve_fatx_path(dirid, name_str);
+        let parent_cluster = id_to_cluster(dirid);
+
+        let vol = Arc::clone(&self.vol);
+        let path_clone = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut vol = vol.write();
+            match vol.create_file(&path_clone, &[]) {
+                Ok(()) => Ok::<(), nfsstat3>(()),
+                Err(fatxlib::error::FatxError::FileExists(_)) => Err(nfsstat3::NFS3ERR_EXIST),
+                Err(e) => {
+                    warn!("create exclusive '{}': {}", path_clone, e);
+                    Err(nfsstat3::NFS3ERR_IO)
+                }
+            }
+        })
+        .await
+        .unwrap_or(Err(nfsstat3::NFS3ERR_IO))?;
+
+        self.flush_needed.store(true, Ordering::Relaxed);
+        self.invalidate_dir(parent_cluster);
+
+        let entries = self.get_dir_entries(parent_cluster).await?;
+        for entry in &entries {
+            if entry.filename().eq_ignore_ascii_case(name_str) {
+                info!(
+                    "NFS create exclusive: \"{}\" -> id={} ({:.1}ms)",
+                    name_str,
+                    cluster_to_id(entry.first_cluster),
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+                return Ok(cluster_to_id(entry.first_cluster));
+            }
+        }
+
+        error!(
+            "NFS create exclusive: \"{}\" created but not found in dir listing!",
+            name_str
+        );
+        Err(nfsstat3::NFS3ERR_IO)
     }
 
     async fn mkdir(
@@ -2244,5 +2289,30 @@ mod tests {
         assert!(fs.file_cache.get(&20).is_none());
         assert!(fs.file_cache.get(&21).is_none());
         assert!(fs.file_cache.get(&30).is_some());
+    }
+
+    #[test]
+    fn test_create_exclusive_rejects_existing_file_without_truncating() {
+        let (_tmp, _image_path, fs) = create_test_nfs();
+
+        {
+            let mut vol = fs.vol.write();
+            vol.create_file("/exists.bin", b"original")
+                .expect("create existing file");
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let result = rt.block_on(async {
+            fs.create_exclusive(ROOT_FILEID, &b"exists.bin".to_vec().into())
+                .await
+        });
+
+        assert!(matches!(result, Err(nfsstat3::NFS3ERR_EXIST)));
+
+        let mut vol = fs.vol.write();
+        assert_eq!(
+            vol.read_file_by_path("/exists.bin").expect("read existing file"),
+            b"original"
+        );
     }
 }
